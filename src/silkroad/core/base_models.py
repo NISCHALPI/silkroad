@@ -1,22 +1,22 @@
-"""Data models for handling financial market time series data.
+"""Generic base models for time series data handling.
 
-This module provides Pydantic-based data models for working with financial market data,
-including price bars, asset metadata, and collections of time-aligned assets. All models
-enforce data validation and type safety through Pydantic v2.
+This module provides reusable, generic data models for working with financial time series
+data. These models are independent of specific asset types and can be used across different
+financial instruments (stocks, bonds, options, etc.) or even adapted for non-financial
+time series data.
 
-The module supports portfolio-level analysis by ensuring that multiple assets can be
-aligned on the same time index with uniform bar intervals, making it suitable for
-backtesting and quantitative analysis workflows.
+The models enforce data validation and type safety through Pydantic v2, and support
+portfolio-level analysis by ensuring multiple time series can be aligned on the same
+time index with uniform intervals.
 
 Classes:
-    UniformBarSet: Time series of OHLCV bars for a single asset at uniform intervals.
+    UniformBarSet: Generic time series of OHLCV bars at uniform intervals.
     UniformBarCollection: Collection of multiple UniformBarSets with aligned timestamps.
-    Asset: Base model for financial asset metadata (symbol, sector, asset class).
-    Stocks: Stock asset combining metadata with time series data.
+    Asset: Base model for generic asset metadata.
 
 Typical usage example:
     >>> # Create bar sets for individual assets
-    >>> aapl_bars = UniformBarSet(
+    >>> asset_bars = UniformBarSet(
     ...     symbol="AAPL",
     ...     horizon=Horizon.ONE_DAY,
     ...     bars=bars_list
@@ -33,40 +33,44 @@ Typical usage example:
     >>> df.loc[("AAPL", "2024-01-01"), "close"]
 
 Notes:
+    - These models are generic and can be extended for specific asset types.
     - All bars in a UniformBarSet must have the same symbol.
     - All bar sets in a UniformBarCollection must share the same horizon and timestamps.
     - Models use Pydantic validation to enforce data integrity at construction time.
-    - The df property returns a multi-indexed DataFrame with (symbol, timestamp) as index.
 
 See Also:
+    silkroad.data.models: Domain-specific models (Stocks, etc.) that extend these base classes.
     silkroad.data.enums: Horizon, AssetClass, and Sector enumerations.
-    silkroad.data.fetchers: Data fetching utilities for populating models.
 """
 
-from __future__ import annotations
-
 from pydantic import BaseModel, field_validator, ConfigDict, ValidationInfo, Field
-from typing import List, Dict, Any, Optional, Union
-from alpaca.data.models import Bar
+from typing import List, Dict, Any, Optional, Union, Annotated
+from alpaca.data.models import Bar, BarSet
 from .enums import Sector, AssetClass, Horizon
+from .types import UniformBarList
 import pandas as pd
 from itertools import product
+from pydantic.functional_validators import BeforeValidator
+import annotated_types as at
+
 
 __all__ = [
     "UniformBarSet",
     "UniformBarCollection",
     "Asset",
-    "Stocks",
 ]
 
 
 class UniformBarSet(BaseModel):
-    """A collection of price bars for a single asset with uniform time intervals.
+    """A generic collection of price bars for a single asset with uniform time intervals.
 
     This class represents a time series of OHLCV (Open, High, Low, Close, Volume) bars
     for a single financial instrument, all sampled at the same time interval (horizon).
     It enforces that all bars belong to the same symbol and provides methods for
     manipulation and resampling.
+
+    This is a generic base class that can be used for any asset type (stocks, bonds,
+    options, futures, crypto, etc.) and can be extended for specific use cases.
 
     Attributes:
         symbol (str): The ticker symbol of the asset (e.g., "AAPL", "GOOGL").
@@ -91,32 +95,30 @@ class UniformBarSet(BaseModel):
 
     symbol: str
     horizon: Horizon
-    bars: List[Bar] = Field(..., min_length=1)
+    bars: UniformBarList
 
     model_config = ConfigDict(validate_assignment=True)
 
-    @field_validator("bars")
-    @classmethod
-    def validate_bar_symbols(cls, v: List[Bar], info: ValidationInfo) -> List[Bar]:
-        """Validate that all bars have the same symbol as the UniformBarSet.
+    @staticmethod
+    def check_contiguous_bars(bars: List[Bar], horizon: Horizon) -> bool:
+        """Check if bars have contiguous timestamps based on the horizon.
+        Note that this method is not currently used in validation since
+        there may be legitimate gaps in data (e.g., weekends, holidays).
+        User is responsible for ensuring data continuity if required.
 
         Args:
-            v (List[Bar]): The list of bars to validate.
-            info (ValidationInfo): Pydantic validation context.
+            bars (List[Bar]): List of bars to check.
+            horizon (Horizon): The expected time interval between bars.
 
         Returns:
-            List[Bar]: The validated list of bars.
-
-        Raises:
-            ValueError: If any bar has a different symbol than the UniformBarSet.
+            bool: True if bars are contiguous, False otherwise.
         """
-        if "symbol" not in info.data:
-            return v
-
-        asset_symbol = info.data["symbol"]
-        if not all(bar.symbol == asset_symbol for bar in v):
-            raise ValueError("All bars must have the same symbol as the UniformBarSet.")
-        return v
+        if len(bars) < 2:
+            return True  # A single bar is trivially contiguous
+        deltas = [
+            bars[i + 1].timestamp - bars[i].timestamp for i in range(len(bars) - 1)
+        ]
+        return all(horizon.check_valid(delta) for delta in deltas)  # type: ignore
 
     @property
     def df(self) -> pd.DataFrame:
@@ -141,11 +143,30 @@ class UniformBarSet(BaseModel):
     def __len__(self) -> int:
         return len(self.bars)
 
-    def __getitem__(self, index: int) -> Bar:
-        return self.bars[index]
+    def __getitem__(self, index: Union[int, slice]) -> Union[Bar, "UniformBarSet"]:
+        """Access bars by index or slice.
+
+        Args:
+            index (Union[int, slice]): The index or slice to retrieve.
+        Returns:
+            Union[Bar, UniformBarSet]: If index is int, returns the Bar at that position.
+                If index is slice, returns a new UniformBarSet with the sliced bars.
+        Examples:
+            >>> first_bar = bar_set[0]
+            >>> subset = bar_set[10:20]
+        """
+        if isinstance(index, int):
+            return self.bars[index]
+        elif isinstance(index, slice):
+            return UniformBarSet(
+                symbol=self.symbol,
+                horizon=self.horizon,
+                bars=self.bars[index],
+            )
 
     def push(self, bar: Bar) -> None:
         """Add a new bar to the end of the bars list.
+        It is user's responsibility to ensure that bars are contiguous w.r.t. horizon.
 
         Args:
             bar (Bar): The bar to add.
@@ -156,6 +177,12 @@ class UniformBarSet(BaseModel):
         if bar.symbol != self.symbol:
             raise ValueError(
                 f"Bar symbol {bar.symbol} does not match UniformBarSet symbol {self.symbol}."
+            )
+        # Check that bars are directed
+        if self.bars[-1].timestamp >= bar.timestamp:
+            raise ValueError(
+                """New bar timestamp must be greater than the last bar's timestamp.
+                Bars must be added in chronological order."""
             )
         self.bars.append(bar)
 
@@ -168,11 +195,13 @@ class UniformBarSet(BaseModel):
         Raises:
             IndexError: If the bars list is empty.
         """
-        if not self.bars:
-            raise IndexError("No bars to pop.")
-        return self.bars.pop()
+        # If bars has length 1, popping is not allowed to prevent empty bar sets
+        if len(self.bars) == 1:
+            raise IndexError("Cannot pop the last bar from UniformBarSet.")
 
-    def resample(self, new_horizon: Horizon) -> UniformBarSet:
+        return self.bars.pop(0)  # Removes the first bar to maintain time order
+
+    def resample(self, new_horizon: Horizon) -> "UniformBarSet":
         """Resample bars to a larger time horizon using OHLCV aggregation rules.
 
         This method aggregates bars into a larger time interval, applying appropriate
@@ -256,7 +285,7 @@ class UniformBarSet(BaseModel):
     def __iter__(self):
         return iter(self.bars)
 
-    def is_compatible(self, other: UniformBarSet) -> bool:
+    def is_compatible(self, other: "UniformBarSet") -> bool:
         """Check if another UniformBarSet is compatible with this one.
 
         Two bar sets are compatible if they share the same horizon and have aligned
@@ -277,13 +306,44 @@ class UniformBarSet(BaseModel):
             return False
 
         if len(self.bars) == 0 or len(other.bars) == 0:
-            return True  # Empty bar sets are considered compatible
+            return True
 
+        if len(self.bars) != len(other.bars):
+            return False
         return self.df.index.equals(other.df.index)
 
 
+# Define CompatibleUniformBarMap type alias
+def validate_mutually_compatible_uniform_bar_sets(
+    bar_sets: Dict[str, UniformBarSet],
+) -> Dict[str, UniformBarSet]:
+    """Validator to ensure all UniformBarSets in the dictionary are mutually compatible.
+
+    Args:
+        bar_sets (Dict[str, UniformBarSet]): The dictionary of bar sets to validate.
+    Returns:
+        Dict[str, UniformBarSet]: The original dictionary if validation passes.
+    Raises:
+        ValueError: If bar sets are not mutually compatible.
+    """
+    for bar_set1, bar_set2 in product(bar_sets.values(), repeat=2):
+        if not bar_set1.is_compatible(bar_set2):
+            raise ValueError("All UniformBarSets must be mutually compatible.")
+    return bar_sets
+
+
+# Type alias for a dictionary of mutually compatible UniformBarSets
+# This is helpful for validation in UniformBarCollection
+# and is useful in timeseries portfolio analysis
+CompatibleUniformBarMap = Annotated[
+    Dict[str, UniformBarSet],
+    at.MinLen(1),
+    BeforeValidator(validate_mutually_compatible_uniform_bar_sets),
+]
+
+
 class UniformBarCollection(BaseModel):
-    """A collection of time-aligned price bars for multiple assets.
+    """A generic collection of time-aligned price bars for multiple assets.
 
     This class manages multiple UniformBarSets, each representing a different financial
     instrument, all synchronized to the same time intervals and timestamps. This alignment
@@ -293,6 +353,8 @@ class UniformBarCollection(BaseModel):
     The collection enforces strict compatibility constraints: all bar sets must have the
     same horizon (time interval) and aligned timestamps. This makes it ideal for multi-asset
     strategies where simultaneous data access across assets is required.
+
+    This is a generic base class that can be used for collections of any asset type.
 
     Attributes:
         bar_sets (Dict[str, UniformBarSet]): Dictionary mapping asset symbols to their
@@ -328,48 +390,9 @@ class UniformBarCollection(BaseModel):
         - Iteration yields dictionaries of bars for each timestamp across all assets.
     """
 
-    bar_sets: Dict[str, UniformBarSet] = Field(..., min_length=1)
+    bar_map: CompatibleUniformBarMap
 
     model_config = ConfigDict(validate_assignment=True)
-
-    @field_validator("bar_sets")
-    @classmethod
-    def validate_bar_sets(cls, v: Dict[str, UniformBarSet]) -> Dict[str, UniformBarSet]:
-        """Validate that all bar sets have unique symbols and are mutually compatible.
-
-        Args:
-            v (Dict[str, UniformBarSet]): Dictionary of bar sets to validate.
-
-        Returns:
-            Dict[str, UniformBarSet]: The validated dictionary.
-
-        Raises:
-            ValueError: If bar sets don't have unique symbols or aren't compatible.
-        """
-        # Check that all UniformBarSets have different symbols
-        symbols = set([bar_set.symbol for bar_set in v.values()])
-        if len(symbols) != len(v):
-            raise ValueError("All UniformBarSets must have different symbols.")
-
-        # Check that all UniformBarSets are compatible
-        if not cls._check_mutual_compatibility(v):
-            raise ValueError("All UniformBarSets must be mutually compatible.")
-        return v
-
-    @classmethod
-    def _check_mutual_compatibility(cls, bar_sets: Dict[str, UniformBarSet]) -> bool:
-        """Check if all bar sets are mutually compatible.
-
-        Args:
-            bar_sets (Dict[str, UniformBarSet]): Dictionary of bar sets to check.
-
-        Returns:
-            bool: True if all bar sets are compatible with each other.
-        """
-        for bar_set1, bar_set2 in product(bar_sets.values(), repeat=2):
-            if not bar_set1.is_compatible(bar_set2):
-                return False
-        return True
 
     @property
     def horizon(self) -> Horizon:
@@ -378,7 +401,7 @@ class UniformBarCollection(BaseModel):
         Returns:
             Horizon: The time interval of all bar sets in the collection.
         """
-        return next(iter(self.bar_sets.values())).horizon
+        return next(iter(self.bar_map.values())).horizon
 
     @property
     def symbols(self) -> List[str]:
@@ -391,7 +414,7 @@ class UniformBarCollection(BaseModel):
             >>> collection.symbols
             ['AAPL', 'GOOGL', 'MSFT']
         """
-        return list(self.bar_sets.keys())
+        return list(self.bar_map.keys())
 
     @property
     def df(self) -> pd.DataFrame:
@@ -407,7 +430,7 @@ class UniformBarCollection(BaseModel):
             >>> collection.df.xs("AAPL", level=0)  # Get all data for AAPL
         """
         dfs = []
-        for symbol, bar_set in self.bar_sets.items():
+        for symbol, bar_set in self.bar_map.items():
             asset_df = bar_set.df.copy()
             asset_df["symbol"] = symbol
             asset_df = asset_df.reset_index()  # timestamp becomes a column
@@ -428,30 +451,13 @@ class UniformBarCollection(BaseModel):
             >>> last_bars = collection.peek()
             >>> print(last_bars["AAPL"].close)
         """
-        return {symbol: bar_set.peek for symbol, bar_set in self.bar_sets.items()}
+        return {symbol: bar_set.peek for symbol, bar_set in self.bar_map.items()}
 
     def __len__(self) -> int:
-        return len(self.bar_sets)
+        return len(self.bar_map)
 
     def __repr__(self) -> str:
-        return f"UniformBarCollection(assets={len(self.bar_sets)}, horizon={self.horizon.name})"
-
-    def __iter__(self):
-        """Iterate over time periods, yielding bars for all assets at each timestamp.
-
-        Yields:
-            Dict[str, Bar]: Dictionary mapping asset symbols to their Bar objects
-                at each timestamp in chronological order.
-
-        Examples:
-            >>> for bars_dict in collection:
-            ...     aapl_close = bars_dict["AAPL"].close
-            ...     googl_close = bars_dict["GOOGL"].close
-            ...     print(f"AAPL: {aapl_close}, GOOGL: {googl_close}")
-        """
-        n = len(next(iter(self.bar_sets.values())).bars)
-        for i in range(n):
-            yield {symbol: bar_set[i] for symbol, bar_set in self.bar_sets.items()}
+        return f"UniformBarCollection(assets={len(self.bar_map)}, horizon={self.horizon.name})"
 
     def get_bar_set(self, symbol: str) -> UniformBarSet:
         """Retrieve the UniformBarSet for a specific asset symbol.
@@ -469,11 +475,11 @@ class UniformBarCollection(BaseModel):
             >>> aapl_bars = collection.get_bar_set("AAPL")
             >>> print(len(aapl_bars))
         """
-        if symbol not in self.bar_sets:
+        if symbol not in self.bar_map:
             raise KeyError(
                 f"UniformBarSet with symbol {symbol} not found in the collection."
             )
-        return self.bar_sets[symbol]
+        return self.bar_map[symbol]
 
     def push(self, new_bars: Dict[str, UniformBarSet]) -> None:
         """Add new bars to existing bar sets in the collection.
@@ -494,28 +500,27 @@ class UniformBarCollection(BaseModel):
             >>> new_data = {"AAPL": new_aapl_bars, "GOOGL": new_googl_bars}
             >>> collection.push(new_data)
         """
-        # Check compatibility of new bar sets with each other
-        if not self._check_mutual_compatibility(new_bars):
-            raise ValueError("New UniformBarSets must be mutually compatible.")
+        # Make a temporary collection to validate compatibility
+        # This checks both mutual compatibility and horizon match
+        # withing the new bars
+        new_bar_collection = UniformBarCollection(bar_map=new_bars)
 
-        # Check new bar sets have same horizon as existing ones
-        existing_horizon = self.horizon
-        for k, nv in new_bars.items():
-            if nv.horizon != self.horizon:
-                raise ValueError(
-                    f"New UniformBarSet for symbol {k} has horizon {nv.horizon.name} "
-                    f"which does not match existing horizon {existing_horizon.name}."
+        # Check horizon compatibility with existing collection
+        if new_bar_collection.horizon != self.horizon:
+            raise ValueError(
+                "New bar sets must have the same horizon as existing collection."
+            )
+
+        # Append bars to existing bar sets
+        for symbol, new_bar_set in new_bars.items():
+            if symbol not in self.bar_map:
+                raise KeyError(
+                    f"UniformBarSet with symbol {symbol} not found in the collection."
                 )
-            break  # Only need to check one since they are mutually compatible
+            for bar in new_bar_set:
+                self.bar_map[symbol].push(bar)
 
-        # Add or update the bar sets in the collection
-        for symbol, bar_set in new_bars.items():
-            for bar in bar_set.bars:
-                self.bar_sets[symbol].push(bar)
-
-        return None
-
-    def resample(self, new_horizon: Horizon) -> UniformBarCollection:
+    def resample(self, new_horizon: Horizon) -> "UniformBarCollection":
         """Resample all bar sets to a larger time horizon.
 
         Creates a new collection where all bar sets have been resampled to the
@@ -536,13 +541,13 @@ class UniformBarCollection(BaseModel):
         """
         resampled_bar_sets = {
             symbol: bar_set.resample(new_horizon=new_horizon)
-            for symbol, bar_set in self.bar_sets.items()
+            for symbol, bar_set in self.bar_map.items()
         }
-        return UniformBarCollection(bar_sets=resampled_bar_sets)
+        return UniformBarCollection(bar_map=resampled_bar_sets)
 
     def __getitem__(
         self, index: Union[slice, int]
-    ) -> Union[Dict[str, Bar], UniformBarCollection]:
+    ) -> Union[Dict[str, Bar], "UniformBarCollection"]:
         """Access bars at a specific index or slice across all assets.
 
         Supports both integer indexing (returns bars at that position) and slice
@@ -567,7 +572,7 @@ class UniformBarCollection(BaseModel):
         """
         # If index is an integer, return a dictionary of bars at that index
         if isinstance(index, int):
-            return {symbol: bar_set[index] for symbol, bar_set in self.bar_sets.items()}
+            return {symbol: bar_set[index] for symbol, bar_set in self.bar_map.items()}  # type: ignore
 
         # If index is a slice, return a new UniformBarCollection with sliced bars
         elif isinstance(index, slice):
@@ -577,19 +582,20 @@ class UniformBarCollection(BaseModel):
                     horizon=bar_set.horizon,
                     bars=bar_set.bars[index],
                 )
-                for symbol, bar_set in self.bar_sets.items()
+                for symbol, bar_set in self.bar_map.items()
             }
-            return UniformBarCollection(bar_sets=sliced_bar_sets)
+            return UniformBarCollection(bar_map=sliced_bar_sets)
 
 
 class Asset(BaseModel):
-    """Base representation of a financial asset with metadata.
+    """Base representation of a generic financial asset with metadata.
 
-    This class provides the foundational structure for representing financial assets,
-    including their classification, sector, and optional metadata.
+    This class provides the foundational structure for representing any financial asset,
+    including their classification, sector, and optional metadata. It is designed to be
+    generic and can be extended for specific asset types (stocks, bonds, options, etc.).
 
     Attributes:
-        symbol (str): The ticker symbol of the asset (e.g., "AAPL", "GOOGL").
+        symbol (str): The ticker symbol of the asset (e.g., "AAPL", "GOOGL", "BTC-USD").
         asset_class (AssetClass): The classification of the asset (e.g., US_EQUITY, CRYPTO).
         sector (Sector): The sector to which the asset belongs (e.g., TECHNOLOGY, FINANCE).
         name (Optional[str]): The full name of the asset (e.g., "Apple Inc."). Defaults to None.
@@ -608,6 +614,7 @@ class Asset(BaseModel):
 
     Notes:
         Assets are considered equal if they have the same symbol.
+        This class can be extended for specific asset types with additional attributes.
     """
 
     symbol: str
@@ -620,11 +627,11 @@ class Asset(BaseModel):
     def __str__(self) -> str:
         return f"{self.symbol} ({self.asset_class.name}, {self.sector.name})"
 
-    def __eq__(self, other: Asset) -> bool:
+    def __eq__(self, other: object) -> bool:
         """Check equality based on symbol.
 
         Args:
-            other (Asset): Another asset to compare with.
+            other (object): Another object to compare with.
 
         Returns:
             bool: True if both assets have the same symbol.
@@ -643,41 +650,3 @@ class Asset(BaseModel):
             int: Hash value of the symbol.
         """
         return hash(self.symbol)
-
-
-class Stocks(Asset, UniformBarSet):
-    """A stock asset with associated time series price and volume data.
-
-    This class combines asset metadata (from Asset) with historical OHLCV data
-    (from UniformBarSet) to provide a complete representation of a stock with
-    its trading history. It inherits attributes and methods from both parent classes.
-
-    Attributes:
-        Inherits all attributes from both Asset and UniformBarSet:
-            - symbol, asset_class, sector, name, exchange, metadata (from Asset)
-            - horizon, bars (from UniformBarSet)
-
-    Examples:
-        Create a stock with metadata and bars:
-            >>> bars = [bar1, bar2, bar3]  # List of Alpaca Bar objects
-            >>> stock = Stocks(
-            ...     symbol="AAPL",
-            ...     asset_class=AssetClass.US_EQUITY,
-            ...     sector=Sector.TECHNOLOGY,
-            ...     name="Apple Inc.",
-            ...     exchange="NASDAQ",
-            ...     horizon=Horizon.ONE_DAY,
-            ...     bars=bars
-            ... )
-            >>> print(stock)  # AAPL (US_EQUITY, TECHNOLOGY)
-            >>> df = stock.df  # Access historical data as DataFrame
-            >>> print(len(stock))  # Number of bars
-
-    Notes:
-        - Combines rich metadata about the stock with its price history.
-        - All methods from both Asset and UniformBarSet are available.
-        - The symbol must be consistent across Asset and UniformBarSet.
-    """
-
-    def __repr__(self) -> str:
-        return f"Stocks(symbol={self.symbol}, asset_class={self.asset_class.name}, sector={self.sector.name}, horizon={self.horizon.name}, bars={len(self.bars)})"

@@ -1,6 +1,7 @@
 """Enumerations used throughout the Silkroad package."""
 
 from enum import Enum
+import pandas as pd
 
 
 class Horizon(Enum):
@@ -18,7 +19,7 @@ class Horizon(Enum):
 
     def to_days(self) -> int:
         """Convert the horizon to the equivalent number of trading days."""
-        return max(self.value, 1)
+        return self.value  # type: ignore
 
     def to_pandas_freq(self) -> str:
         """Convert the horizon to a pandas frequency string."""
@@ -34,6 +35,27 @@ class Horizon(Enum):
             Horizon.ANNUAL: "YE",
         }
         return mapping[self]
+
+    def to_pandas_timedelta(self):
+        """Convert the horizon to a pandas Timedelta object."""
+        mapping = {
+            Horizon.SECONDS: pd.Timedelta(seconds=1),
+            Horizon.MINUTE: pd.Timedelta(minutes=1),
+            Horizon.HOURLY: pd.Timedelta(hours=1),
+            Horizon.DAILY: pd.Timedelta(days=1),
+            Horizon.WEEKLY: pd.Timedelta(weeks=1),
+            Horizon.MONTHLY: pd.Timedelta(days=21),
+            Horizon.QUARTERLY: pd.Timedelta(days=63),
+            Horizon.SEMI_ANNUAL: pd.Timedelta(days=126),
+            Horizon.ANNUAL: pd.Timedelta(days=252),
+        }
+        return mapping[self]
+
+    def check_valid(self, delta: pd.Timedelta) -> bool:
+        """Check if a given pandas Timedelta matches the horizon within a tolerance."""
+        expected = self.to_pandas_timedelta()
+        tolerance = pd.Timedelta(milliseconds=1)
+        return abs(delta - expected) <= tolerance
 
 
 class DataBackend(Enum):
