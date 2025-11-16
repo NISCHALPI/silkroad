@@ -1,4 +1,4 @@
-"""Top level imports for core datastructures in Silkroad."""
+"""Core data structures for time series analysis."""
 
 from .base_models import UniformBarCollection, UniformBarSet, Asset
 from .enums import Horizon, AssetClass, Sector, Exchange

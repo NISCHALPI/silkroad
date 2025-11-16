@@ -1,11 +1,11 @@
-"""Enumerations used throughout the Silkroad package."""
+"""Enumerations for trading horizons, asset classes, sectors, and exchanges."""
 
 from enum import Enum
 import pandas as pd
 
 
 class Horizon(Enum):
-    """Enumeration for different trading horizons using their respective number of trading days."""
+    """Trading horizons represented by their equivalent number of trading days."""
 
     SECONDS = -2
     MINUTE = -1
@@ -18,11 +18,38 @@ class Horizon(Enum):
     ANNUAL = 252
 
     def to_days(self) -> int:
-        """Convert the horizon to the equivalent number of trading days."""
+        """Convert the horizon to the equivalent number of trading days.
+
+        Returns:
+            Number of trading days.
+        """
         return self.value  # type: ignore
 
+    def periods_annually(self) -> float:
+        """Number of periods in a year for the given horizon.
+
+        Returns:
+            Number of periods annually as a float.
+        """
+        mapping = {
+            Horizon.SECONDS: 252 * 6.5 * 60 * 60,
+            Horizon.MINUTE: 252 * 6.5 * 60,
+            Horizon.HOURLY: 252 * 6.5,
+            Horizon.DAILY: 252,
+            Horizon.WEEKLY: 52,
+            Horizon.MONTHLY: 12,
+            Horizon.QUARTERLY: 4,
+            Horizon.SEMI_ANNUAL: 2,
+            Horizon.ANNUAL: 1,
+        }
+        return mapping[self]
+
     def to_pandas_freq(self) -> str:
-        """Convert the horizon to a pandas frequency string."""
+        """Convert the horizon to a pandas frequency string.
+
+        Returns:
+            Pandas frequency string (e.g., 'D', 'W', 'M').
+        """
         mapping = {
             Horizon.SECONDS: "S",
             Horizon.MINUTE: "T",
@@ -37,7 +64,11 @@ class Horizon(Enum):
         return mapping[self]
 
     def to_pandas_timedelta(self):
-        """Convert the horizon to a pandas Timedelta object."""
+        """Convert the horizon to a pandas Timedelta object.
+
+        Returns:
+            Pandas Timedelta object corresponding to the horizon.
+        """
         mapping = {
             Horizon.SECONDS: pd.Timedelta(seconds=1),
             Horizon.MINUTE: pd.Timedelta(minutes=1),
@@ -52,21 +83,28 @@ class Horizon(Enum):
         return mapping[self]
 
     def check_valid(self, delta: pd.Timedelta) -> bool:
-        """Check if a given pandas Timedelta matches the horizon within a tolerance."""
+        """Check if a given pandas Timedelta matches the horizon within tolerance.
+
+        Args:
+            delta: Pandas Timedelta to check.
+
+        Returns:
+            True if delta matches horizon within 1ms tolerance, False otherwise.
+        """
         expected = self.to_pandas_timedelta()
         tolerance = pd.Timedelta(milliseconds=1)
         return abs(delta - expected) <= tolerance
 
 
 class DataBackend(Enum):
-    """Enumeration for different data backends."""
+    """Data backend providers."""
 
     YFINANCE = "yfinance"
     ALPACA = "alpaca"
 
 
 class AssetClass(Enum):
-    """Enumeration for different asset classes."""
+    """Asset class types."""
 
     STOCK = 0
     BOND = 1
@@ -78,7 +116,7 @@ class AssetClass(Enum):
 
 
 class Sector(Enum):
-    """Enumeration for different industry sectors."""
+    """Industry sectors."""
 
     TECHNOLOGY = 0
     HEALTHCARE = 1
@@ -95,7 +133,7 @@ class Sector(Enum):
 
 
 class Exchange(Enum):
-    """Enumeration for different stock exchanges."""
+    """Stock exchanges."""
 
     NYSE = "NYSE"
     NASDAQ = "NASDAQ"

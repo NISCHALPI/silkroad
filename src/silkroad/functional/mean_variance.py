@@ -24,7 +24,7 @@ mean_variance_optimization
 """
 
 import cvxpy as cp
-from jax import Array
+from numpy import ndarray as Array
 import typing as tp
 
 

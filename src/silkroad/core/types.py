@@ -1,16 +1,4 @@
-"""Reusable type definitions for the Silkroad data module.
-
-This module provides type aliases and constrained types that can be used across
-different parts of the package for type safety and validation.
-
-Type Aliases:
-    BarList: A list of Bar objects with at least one element.
-    SymbolDict: A dictionary mapping symbols (str) to any value type.
-    TimeSeriesDict: A dictionary mapping symbols to their respective time series data.
-
-These types can be reused across different modules for consistent type checking
-and validation.
-"""
+"""Type definitions and validators for time series data."""
 
 from typing import Annotated, List
 from alpaca.data.models import Bar
@@ -27,14 +15,17 @@ BarList = Annotated[List[Bar], at.MinLen(1)]
 
 # Check if Bar are of same symbol and Bars are increasing in time
 def validate_uniform_bars(bars: List[Bar]) -> List[Bar]:
-    """Validator to ensure all bars in the list have the same symbol.
+    """Validator to ensure all bars have the same symbol and are time-ordered.
 
     Args:
-        bars (List[Bar]): The list of Bar objects to validate.
+        bars: List of Bar objects to validate.
+
     Returns:
-        List[Bar]: The original list if validation passes.
+        Original list if validation passes.
+
     Raises:
-        ValueError: If bars have differing symbols.
+        ValueError: If bars have differing symbols or are not in strictly
+            increasing order of timestamp.
     """
     if not bars:
         return bars  # Empty list is considered valid
