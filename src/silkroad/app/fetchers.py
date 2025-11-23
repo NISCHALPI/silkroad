@@ -7,10 +7,9 @@ import typing as tp
 from silkroad.logger.logger import logger
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.historical import StockHistoricalDataClient
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.enums import Adjustment
-import numpy as np
 
 __all__ = ["fetch_macroeconomic_data"]
 

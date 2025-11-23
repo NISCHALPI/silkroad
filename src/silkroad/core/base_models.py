@@ -18,9 +18,16 @@ Key Features:
     - Pandas DataFrame integration for analysis
 """
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    TypeAdapter,
+    PrivateAttr,
+    Field,
+    computed_field,
+)
 from typing import List, Dict, Any, Optional, Union, Annotated, Tuple
-from alpaca.data.models import Bar, BarSet
+from alpaca.data.models.bars import Bar
 from .enums import Sector, AssetClass, Horizon
 from .types import UniformBarList
 import pandas as pd
@@ -55,14 +62,86 @@ class UniformBarSet(BaseModel):
     Attributes:
         symbol: Ticker symbol of the asset (e.g., "AAPL", "BTC-USD").
         horizon: Time interval between bars (e.g., DAILY, HOURLY).
-        bars: List of price bars from Alpaca API with at least one element.
     """
 
-    symbol: str
-    horizon: Horizon
-    bars: UniformBarList
+    symbol: str = Field(
+        ..., description="Ticker symbol of the asset (e.g., 'AAPL', 'BTC-USD')."
+    )
+    horizon: Horizon = Field(
+        ..., description="Time interval between bars (e.g., DAILY, HOURLY)."
+    )
+    buffer_limit: int = Field(
+        1000,
+        description="Maximum number of bars in the buffer before merging into DataFrame.",
+    )
+    max_bars: Optional[int] = Field(
+        None,
+        description="Maximum number of bars to keep (Ring Buffer mode). If None, infinite capacity.",
+    )
 
-    model_config = ConfigDict(validate_assignment=True)
+    # Internal state
+    _df: pd.DataFrame = PrivateAttr(default_factory=pd.DataFrame)
+    _buffer: List[Bar] = PrivateAttr(default_factory=list)
+
+    # Temporary field to handle 'bars' argument in constructor without overriding __init__
+    initial_bars: Optional[List[Bar]] = Field(default=None, alias="bars", exclude=True)
+
+    # model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def model_post_init(self, __context: Any) -> None:
+        # Initialize internal storage
+        self._buffer = []
+
+        if self.initial_bars:
+            # Validate bars first
+            validated_bars = TypeAdapter(UniformBarList).validate_python(
+                self.initial_bars
+            )
+
+            # Truncate if max_bars is set
+            if self.max_bars is not None and len(validated_bars) > self.max_bars:
+                validated_bars = validated_bars[-self.max_bars :]
+
+            # Create initial DataFrame
+            data_dicts = [bar.model_dump() for bar in validated_bars]
+            self._df = (
+                pd.DataFrame(data_dicts).drop(columns=["symbol"]).set_index("timestamp")
+            )
+            self._df.sort_index(inplace=True)
+
+            # Clear initial_bars to free memory
+            self.initial_bars = None
+        else:
+            self._df = pd.DataFrame()
+
+    @computed_field
+    @property
+    def bars(self) -> List[Bar]:
+        """Get all bars as a list (reconstructed from DF and buffer).
+
+        Note: This is expensive as it reconstructs objects from the DataFrame.
+        Use .df for analysis whenever possible.
+        """
+        # Convert DF back to bars
+        df_bars = []
+        if not self._df.empty:
+            # Rename columns to match Bar raw_data expectation
+            df_renamed = self._df.rename(
+                columns={
+                    "open": "o",
+                    "high": "h",
+                    "low": "l",
+                    "close": "c",
+                    "volume": "v",
+                    "trade_count": "n",
+                    "vwap": "vw",
+                }
+            )
+            df_renamed.index.name = "t"
+            records = df_renamed.reset_index().to_dict(orient="records")
+            df_bars = [Bar(symbol=self.symbol, raw_data=record) for record in records]
+
+        return df_bars + self._buffer
 
     @staticmethod
     def check_contiguous_bars(bars: List[Bar], horizon: Horizon) -> bool:
@@ -90,14 +169,25 @@ class UniformBarSet(BaseModel):
             DataFrame with timestamp index and OHLCV columns (open, high, low, close,
             volume, trade_count, vwap).
         """
-        data_dicts = [bar.model_dump() for bar in self.bars]
-        return pd.DataFrame(data_dicts).drop(columns=["symbol"]).set_index("timestamp")
+        if not self._buffer:
+            return self._df
+
+        # Convert buffer to DataFrame
+        buffer_dicts = [bar.model_dump() for bar in self._buffer]
+        buffer_df = (
+            pd.DataFrame(buffer_dicts).drop(columns=["symbol"]).set_index("timestamp")
+        )
+
+        # Concatenate with main DF
+        # We return a new DF, we don't merge into _df here to keep push() fast
+        # Merging happens only when we decide to flush buffer (not implemented yet)
+        return pd.concat([self._df, buffer_df])
 
     def __repr__(self) -> str:
-        return f"UniformBarSet(symbol={self.symbol}, timeframe={self.horizon.name}, bars={len(self.bars)})"
+        return f"UniformBarSet(symbol={self.symbol}, timeframe={self.horizon.name}, bars={len(self)})"
 
     def __len__(self) -> int:
-        return len(self.bars)
+        return len(self._df) + len(self._buffer)
 
     def __getitem__(self, index: Union[int, slice]) -> Union[Bar, "UniformBarSet"]:
         """Access bars by index or slice.
@@ -109,14 +199,62 @@ class UniformBarSet(BaseModel):
             Bar at the index position if index is int, or new UniformBarSet with
             sliced bars if index is slice.
         """
+        # This is tricky with hybrid storage.
+        # For simplicity and correctness, we might need to reconstruct the list
+        # or handle logic to map index to df or buffer.
+        if not isinstance(index, (int, slice)):
+            raise TypeError("Index must be int or slice")
+
+        # Optimization: If index is simple int
+        total_len = len(self)
         if isinstance(index, int):
-            return self.bars[index]
+            if index < 0:
+                index += total_len
+            if index < 0 or index >= total_len:
+                raise IndexError("UniformBarSet index out of range")
+
+            df_len = len(self._df)
+            if index < df_len:
+                # Get from DF
+                row = self._df.iloc[index]
+                data = {
+                    "t": row.name,
+                    "o": row["open"],
+                    "h": row["high"],
+                    "l": row["low"],
+                    "c": row["close"],
+                    "v": row["volume"],
+                    "n": row["trade_count"],
+                    "vw": row["vwap"],
+                }
+                return Bar(symbol=self.symbol, raw_data=data)
+            else:
+                # Get from buffer
+                return self._buffer[index - df_len]
+
         elif isinstance(index, slice):
+            # For slicing, it's easiest to reconstruct the full list or DF
+            # But we want to return a UniformBarSet.
+            # Let's use the .bars property to get the full list and slice it.
+            # This is expensive but correct.
+            sliced_bars = self.bars[index]
             return UniformBarSet(
                 symbol=self.symbol,
                 horizon=self.horizon,
-                bars=self.bars[index],
+                bars=sliced_bars,
             )
+
+    def _flush_buffer(self) -> None:
+        """Merge the buffer into the main DataFrame."""
+        if not self._buffer:
+            return
+
+        buffer_dicts = [bar.model_dump() for bar in self._buffer]
+        buffer_df = (
+            pd.DataFrame(buffer_dicts).drop(columns=["symbol"]).set_index("timestamp")
+        )
+        self._df = pd.concat([self._df, buffer_df])
+        self._buffer = []
 
     def push(self, bar: Bar) -> None:
         """Add a new bar to the end of the bars list.
@@ -132,28 +270,62 @@ class UniformBarSet(BaseModel):
             raise ValueError(
                 f"Bar symbol {bar.symbol} does not match UniformBarSet symbol {self.symbol}."
             )
+
         # Check that bars are directed
-        if self.bars[-1].timestamp >= bar.timestamp:
+        last_bar = self.peek
+        if last_bar and last_bar.timestamp >= bar.timestamp:
             raise ValueError(
                 """New bar timestamp must be greater than the last bar's timestamp.
                 Bars must be added in chronological order."""
             )
-        self.bars.append(bar)
+        self._buffer.append(bar)
+
+        # Check if buffer limit reached
+        if len(self._buffer) >= self.buffer_limit:
+            self._flush_buffer()
+
+        # Enforce max_bars (Ring Buffer)
+        if self.max_bars is not None:
+            while len(self) > self.max_bars:
+                self.pop()
 
     def pop(self) -> Bar:
-        """Remove and return the first bar from the bars list.
+        """Remove and return the first bar from the collection.
 
         Returns:
             First bar in the collection.
 
         Raises:
-            IndexError: If bars list has only one element.
+            IndexError: If collection has only one element.
         """
-        # If bars has length 1, popping is not allowed to prevent empty bar sets
-        if len(self.bars) == 1:
+        if len(self) <= 1:
             raise IndexError("Cannot pop the last bar from UniformBarSet.")
 
-        return self.bars.pop(0)  # Removes the first bar to maintain time order
+        # If we have data in DF, pop from there (expensive-ish, but we can optimize)
+        # Actually, popping from start of DF is not great either, but better than list?
+        # DF doesn't have a pop(0). We have to drop the row.
+
+        if not self._df.empty:
+            # Get first row
+            row = self._df.iloc[0]
+            data = {
+                "t": row.name,
+                "o": row["open"],
+                "h": row["high"],
+                "l": row["low"],
+                "c": row["close"],
+                "v": row["volume"],
+                "n": row["trade_count"],
+                "vw": row["vwap"],
+            }
+            bar = Bar(symbol=self.symbol, raw_data=data)
+
+            # Remove from DF
+            self._df = self._df.iloc[1:]
+            return bar
+        else:
+            # Pop from buffer
+            return self._buffer.pop(0)
 
     def resample(self, new_horizon: Horizon) -> "UniformBarSet":
         """Resample bars to a larger time horizon using OHLCV aggregation rules.
@@ -174,6 +346,7 @@ class UniformBarSet(BaseModel):
             )
 
         # Use pandas to resample the bars
+        # We use the combined DF
         df = self.df
         df_resampled = (
             df.resample(new_horizon.to_pandas_freq())
@@ -219,12 +392,45 @@ class UniformBarSet(BaseModel):
         Returns:
             Last bar or None if collection is empty.
         """
-        if not self.bars:
-            return None
-        return self.bars[-1]
+        if self._buffer:
+            return self._buffer[-1]
+
+        if not self._df.empty:
+            row = self._df.iloc[-1]
+            data = {
+                "t": row.name,
+                "o": row["open"],
+                "h": row["high"],
+                "l": row["low"],
+                "c": row["close"],
+                "v": row["volume"],
+                "n": row["trade_count"],
+                "vw": row["vwap"],
+            }
+            return Bar(symbol=self.symbol, raw_data=data)
+
+        return None
 
     def __iter__(self):
-        return iter(self.bars)
+        # Iterate over DF then buffer
+        # This is a generator
+        if not self._df.empty:
+            # This is slow, iterating rows
+            for timestamp, row in self._df.iterrows():
+                data = {
+                    "t": timestamp,
+                    "o": row["open"],
+                    "h": row["high"],
+                    "l": row["low"],
+                    "c": row["close"],
+                    "v": row["volume"],
+                    "n": row["trade_count"],
+                    "vw": row["vwap"],
+                }
+                yield Bar(symbol=self.symbol, raw_data=data)
+
+        for bar in self._buffer:
+            yield bar
 
     def is_compatible(self, other: "UniformBarSet") -> bool:
         """Check if another UniformBarSet is compatible with this one.
@@ -238,11 +444,26 @@ class UniformBarSet(BaseModel):
         if self.horizon != other.horizon:
             return False
 
-        if len(self.bars) == 0 or len(other.bars) == 0:
+        if len(self) == 0 or len(other) == 0:
             return True
 
-        if len(self.bars) != len(other.bars):
+        if len(self) != len(other):
             return False
+
+        # Fast fail checks
+        # Check start and end timestamps
+        # We need to be careful with buffer/df mix
+        self_start = self.df.index[0]
+        other_start = other.df.index[0]
+        if self_start != other_start:
+            return False
+
+        self_end = self.df.index[-1]
+        other_end = other.df.index[-1]
+        if self_end != other_end:
+            return False
+
+        # Compare indices
         return self.df.index.equals(other.df.index)
 
     def intersect(self, other: "UniformBarSet") -> "UniformBarSet":
@@ -255,17 +476,48 @@ class UniformBarSet(BaseModel):
             New UniformBarSet containing only the overlapping bars.
         """
         # Get common timestamps
-        common_timestamps = self.df.index.intersection(other.df.index)
+        # Use .df.index which constructs the full index
+        idx1 = self.df.index
+        idx2 = other.df.index
+
+        common_timestamps = idx1.intersection(idx2)
         if common_timestamps.empty:
             raise ValueError(
                 f"No overlapping timestamps between {self.symbol} and {other.symbol}."
             )
 
         # Filter bars to only those with common timestamps
+        # We can use the .df to filter and create new set
+        # This is cleaner than iterating
+
+        # Note: This creates a new UniformBarSet, which will initialize its own DF
+        # We need to pass 'bars' to the constructor as per current design,
+        # or we could make the constructor smarter.
+        # For now, let's reconstruct bars.
+
+        # Filter self
+        filtered_df = self.df.loc[common_timestamps]
+
+        # Convert to bars
+        df_renamed = filtered_df.rename(
+            columns={
+                "open": "o",
+                "high": "h",
+                "low": "l",
+                "close": "c",
+                "volume": "v",
+                "trade_count": "n",
+                "vwap": "vw",
+            }
+        )
+        df_renamed.index.name = "t"
+        records = df_renamed.reset_index().to_dict(orient="records")
+        bars = [Bar(symbol=self.symbol, raw_data=record) for record in records]
+
         return UniformBarSet(
             symbol=self.symbol,
             horizon=self.horizon,
-            bars=[bar for bar in self.bars if bar.timestamp in common_timestamps],
+            bars=bars,
         )
 
     @staticmethod
@@ -313,9 +565,18 @@ def validate_mutually_compatible_uniform_bar_sets(
     Raises:
         ValueError: If bar sets are not mutually compatible.
     """
-    for bar_set1, bar_set2 in product(bar_sets.values(), repeat=2):
-        if not bar_set1.is_compatible(bar_set2):
+    if not bar_sets:
+        return bar_sets
+
+    # Optimization: Compare all against the first one (O(N))
+    # instead of pairwise (O(N^2))
+    iterator = iter(bar_sets.values())
+    reference_set = next(iterator)
+
+    for other_set in iterator:
+        if not reference_set.is_compatible(other_set):
             raise ValueError("All UniformBarSets must be mutually compatible.")
+
     return bar_sets
 
 
@@ -354,9 +615,12 @@ class UniformBarCollection(BaseModel):
             Must contain at least one bar set and all bar sets must be mutually compatible.
     """
 
-    bar_map: CompatibleUniformBarMap
+    bar_map: CompatibleUniformBarMap = Field(
+        ..., description="Dictionary mapping asset symbols to their UniformBarSets."
+    )
+    _df_cache: Optional[pd.DataFrame] = PrivateAttr(default=None)
 
-    model_config = ConfigDict(validate_assignment=True)
+    model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True)
 
     @property
     def horizon(self) -> Horizon:
@@ -383,6 +647,9 @@ class UniformBarCollection(BaseModel):
         Returns:
             DataFrame with MultiIndex (symbol, timestamp) and OHLCV columns.
         """
+        if self._df_cache is not None:
+            return self._df_cache
+
         dfs = []
         for symbol, bar_set in self.bar_map.items():
             asset_df = bar_set.df.copy()
@@ -392,6 +659,8 @@ class UniformBarCollection(BaseModel):
 
         combined_df = pd.concat(dfs, ignore_index=True)
         combined_df = combined_df.set_index(["symbol", "timestamp"])
+
+        self._df_cache = combined_df
         return combined_df
 
     def peek(self) -> Dict[str, Optional[Bar]]:
@@ -458,6 +727,9 @@ class UniformBarCollection(BaseModel):
             for bar in new_bar_set:
                 self.bar_map[symbol].push(bar)
 
+        # Invalidate cache
+        self._df_cache = None
+
     def pop(self) -> Dict[str, Bar]:
         """Remove and return the first bar from each bar set in the collection.
 
@@ -470,6 +742,9 @@ class UniformBarCollection(BaseModel):
         popped_bars = {}
         for symbol, bar_set in self.bar_map.items():
             popped_bars[symbol] = bar_set.pop()
+
+        # Invalidate cache
+        self._df_cache = None
         return popped_bars
 
     def resample(self, new_horizon: Horizon) -> "UniformBarCollection":

@@ -15,11 +15,14 @@ dependencies = [
     "jax[cuda]>=0.8.0",
     "matplotlib>=3.10.7",
     "pandas>=2.3.3",
+    "plotly>=6.5.0",
     "pydantic>=2.12.4",
+    "scikit-learn>=1.7.2",
     "seaborn>=0.13.2",
     "statsmodels>=0.14.5",
     "sympy>=1.14.0",
     "ta-lib>=0.6.8",
+    "xgboost>=3.1.1",
     "yfinance>=0.2.66",
 ]
 
@@ -30,4 +33,6 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "ipykernel>=7.1.0",
+    "nbformat>=5.10.4",
+    "pytest>=9.0.1",
 ]

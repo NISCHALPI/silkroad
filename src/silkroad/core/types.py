@@ -1,7 +1,7 @@
 """Type definitions and validators for time series data."""
 
 from typing import Annotated, List
-from alpaca.data.models import Bar
+from alpaca.data.models.bars import Bar
 import annotated_types as at
 from pydantic.functional_validators import BeforeValidator
 
@@ -9,7 +9,7 @@ __all__ = [
     "BarList",
 ]
 
-# A list of Bar objects with at least one element
+# A list of Bar objects with at least one elements
 BarList = Annotated[List[Bar], at.MinLen(1)]
 
 
@@ -21,7 +21,7 @@ def validate_uniform_bars(bars: List[Bar]) -> List[Bar]:
         bars: List of Bar objects to validate.
 
     Returns:
-        Original list if validation passes.
+        Original list if validation passes.s
 
     Raises:
         ValueError: If bars have differing symbols or are not in strictly
