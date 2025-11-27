@@ -24,19 +24,19 @@ mean_variance_optimization
 """
 
 import cvxpy as cp
-from numpy import ndarray as Array
+import numpy as np
 import typing as tp
 
 
-__all__ = ["mean_variance_optimization"]
+__all__ = ["mean_variance_optimization", "log_moments_to_simple_moments"]
 
 
 def mean_variance_optimization(
-    mu: Array,
-    cov: Array,
+    mu: np.ndarray,
+    cov: np.ndarray,
     target_return: float,
     short_selling: bool = False,
-) -> tp.Dict[str, tp.Union[Array, float, str]]:
+) -> tp.Dict[str, tp.Union[np.ndarray, float, str]]:
     r"""Solve a mean-variance optimization problem.
 
     The optimization is the Markowitz quadratic program:
@@ -104,6 +104,43 @@ def mean_variance_optimization(
     return {
         "weights": w.value,  # type: ignore
         "status": problem.status,
-        "optimal_value": problem.value,
+        "risk": problem.value,
         "target_return": target_return,
     }
+
+
+def log_moments_to_simple_moments(
+    mu: np.ndarray, cov: np.ndarray
+) -> tp.Tuple[np.ndarray, np.ndarray]:
+    r"""Convert log-return moments to simple return moments.
+
+    Given the mean vector and covariance matrix of log-returns, this function
+    computes the corresponding mean vector and covariance matrix of simple returns
+    assuming log-returns are normally distributed.
+
+    Args:
+        mu: Mean vector of log-returns (shape ``(n_assets,)``).
+        cov: Covariance matrix of log-returns (shape ``(n_assets, n_assets)``).
+
+    Returns:
+        A tuple containing:
+            - Mean vector of simple returns (numpy array of shape ``(n_assets,)``).
+            - Covariance matrix of simple returns (numpy array of shape ``(n_assets, n_assets)``).
+
+    Examples:
+        >>> log_mu = np.array([0.01, 0.02])
+        >>> log_cov = np.array([[0.0001, 0.00002],
+        ...                     [0.00002, 0.0002]])
+        >>> simple_mu, simple_cov = log_moments_to_simple_moments(log_mu, log_cov)
+    """
+    mu_simp = np.exp(mu + 0.5 * np.diag(cov)) - 1
+    n = mu.shape[0]
+    cov_simp = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            cov_simp[i, j] = (
+                (np.exp(cov[i, j]) - 1)
+                * np.exp(mu[i] + 0.5 * cov[i, i])
+                * np.exp(mu[j] + 0.5 * cov[j, j])
+            )
+    return mu_simp, cov_simp

@@ -12,3 +12,4 @@ wheels/
 notebook/*
 data/*
 .api_keys/*
+!notebook/weekly_forecaster.ipynb

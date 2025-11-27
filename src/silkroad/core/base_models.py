@@ -34,6 +34,7 @@ import pandas as pd
 from itertools import product
 from pydantic.functional_validators import BeforeValidator
 import annotated_types as at
+import numpy as np
 
 
 __all__ = [
@@ -139,7 +140,7 @@ class UniformBarSet(BaseModel):
             )
             df_renamed.index.name = "t"
             records = df_renamed.reset_index().to_dict(orient="records")
-            df_bars = [Bar(symbol=self.symbol, raw_data=record) for record in records]
+            df_bars = [Bar(symbol=self.symbol, raw_data=record) for record in records]  # type: ignore
 
         return df_bars + self._buffer
 
@@ -242,6 +243,8 @@ class UniformBarSet(BaseModel):
                 symbol=self.symbol,
                 horizon=self.horizon,
                 bars=sliced_bars,
+                buffer_limit=self.buffer_limit,
+                max_bars=self.max_bars,
             )
 
     def _flush_buffer(self) -> None:
@@ -383,6 +386,8 @@ class UniformBarSet(BaseModel):
             symbol=self.symbol,
             horizon=new_horizon,
             bars=bars,
+            buffer_limit=self.buffer_limit,
+            max_bars=self.max_bars,
         )
 
     @property
@@ -512,12 +517,14 @@ class UniformBarSet(BaseModel):
         )
         df_renamed.index.name = "t"
         records = df_renamed.reset_index().to_dict(orient="records")
-        bars = [Bar(symbol=self.symbol, raw_data=record) for record in records]
+        bars = [Bar(symbol=self.symbol, raw_data=record) for record in records]  # type: ignore
 
         return UniformBarSet(
             symbol=self.symbol,
             horizon=self.horizon,
             bars=bars,
+            buffer_limit=self.buffer_limit,
+            max_bars=self.max_bars,
         )
 
     @staticmethod
@@ -663,6 +670,37 @@ class UniformBarCollection(BaseModel):
         self._df_cache = combined_df
         return combined_df
 
+    @property
+    def close(self) -> pd.DataFrame:
+        """Get a DataFrame of closing prices for all assets.
+
+        Returns:
+            DataFrame with MultiIndex (symbol, timestamp) and 'close' column.
+        """
+        df = self.df.reset_index()
+        close_df = df.pivot(index="timestamp", columns="symbol", values="close")
+        return close_df
+
+    @property
+    def log_returns(self) -> pd.DataFrame:
+        """Get a DataFrame of log returns for all assets.
+
+        Returns:
+            DataFrame with MultiIndex (symbol, timestamp) and log return values.
+        """
+        close_df = self.close
+        log_return_df = (close_df / close_df.shift(1)).dropna().apply(np.log)
+        return log_return_df
+
+    @property
+    def arthimetic_returns(self) -> pd.DataFrame:
+        """Get a DataFrame of arithmetic returns for all assets.
+
+        Returns:
+            DataFrame with MultiIndex (symbol, timestamp) and arithmetic return values.
+        """
+        return self.close.pct_change().dropna()
+
     def peek(self) -> Dict[str, Optional[Bar]]:
         """Get the most recent bar for each asset without removing it.
 
@@ -788,6 +826,8 @@ class UniformBarCollection(BaseModel):
                     symbol=bar_set.symbol,
                     horizon=bar_set.horizon,
                     bars=bar_set.bars[index],
+                    buffer_limit=bar_set.buffer_limit,
+                    max_bars=bar_set.max_bars,
                 )
                 for symbol, bar_set in self.bar_map.items()
             }
