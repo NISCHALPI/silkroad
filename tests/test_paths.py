@@ -170,3 +170,78 @@ def test_ou_reversion():
     final_dist = abs(final_mean - theta)
 
     assert final_dist < init_dist
+
+
+def test_bootstrap_shapes():
+    from silkroad.functional.paths import (
+        moving_block_bootstrap,
+        circular_block_bootstrap,
+        stationary_bootstrap,
+    )
+
+    n_paths = 5
+    n_steps = 50
+    init_price = 100.0
+    # Create some dummy log returns
+    log_returns = jax.random.normal(jax.random.PRNGKey(0), (100,)) * 0.01
+    block_size = 5
+    key = jax.random.PRNGKey(1)
+
+    # MBB
+    prices_mbb = moving_block_bootstrap(
+        n_paths, n_steps, init_price, log_returns, block_size, key
+    )
+    assert prices_mbb.shape == (n_paths, n_steps)
+    assert jnp.allclose(prices_mbb[:, 0], init_price)
+    assert jnp.all(prices_mbb > 0)
+
+    # CBB
+    prices_cbb = circular_block_bootstrap(
+        n_paths, n_steps, init_price, log_returns, block_size, key
+    )
+    assert prices_cbb.shape == (n_paths, n_steps)
+    assert jnp.allclose(prices_cbb[:, 0], init_price)
+    assert jnp.all(prices_cbb > 0)
+
+    # SB
+    prices_sb = stationary_bootstrap(
+        n_paths, n_steps, init_price, log_returns, key, p=0.1
+    )
+    assert prices_sb.shape == (n_paths, n_steps)
+    assert jnp.allclose(prices_sb[:, 0], init_price)
+    assert jnp.all(prices_sb > 0)
+
+
+def test_bootstrap_jit():
+    from silkroad.functional.paths import (
+        moving_block_bootstrap,
+        circular_block_bootstrap,
+        stationary_bootstrap,
+    )
+
+    n_paths = 5
+    n_steps = 50
+    init_price = 100.0
+    log_returns = jax.random.normal(jax.random.PRNGKey(0), (100,)) * 0.01
+    block_size = 5
+    key = jax.random.PRNGKey(1)
+
+    # MBB
+    jit_mbb = jax.jit(
+        moving_block_bootstrap, static_argnames=("n_paths", "n_steps", "block_size")
+    )
+    prices_mbb = jit_mbb(n_paths, n_steps, init_price, log_returns, block_size, key)
+    assert prices_mbb.shape == (n_paths, n_steps)
+
+    # CBB
+    jit_cbb = jax.jit(
+        circular_block_bootstrap, static_argnames=("n_paths", "n_steps", "block_size")
+    )
+    prices_cbb = jit_cbb(n_paths, n_steps, init_price, log_returns, block_size, key)
+    assert prices_cbb.shape == (n_paths, n_steps)
+
+    # SB
+    # p is not static, but n_paths and n_steps are
+    jit_sb = jax.jit(stationary_bootstrap, static_argnames=("n_paths", "n_steps"))
+    prices_sb = jit_sb(n_paths, n_steps, init_price, log_returns, key, p=0.1)
+    assert prices_sb.shape == (n_paths, n_steps)

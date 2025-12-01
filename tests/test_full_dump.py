@@ -1,6 +1,6 @@
 import pytest
 import pandas as pd
-from silkroad.core.base_models import UniformBarSet, Horizon
+from silkroad.core.data_models import UniformBarSet, Horizon
 from alpaca.data.models import Bar
 
 
@@ -18,7 +18,7 @@ def test_full_dump_inclusion():
             "vw": 100,
         },
     )
-    ubs = UniformBarSet(symbol="AAPL", horizon=Horizon.DAILY, bars=[bar])
+    ubs = UniformBarSet(symbol="AAPL", horizon=Horizon.DAILY, initial_bars=[bar])
 
     # Default dump should include bars
     dump = ubs.model_dump()
@@ -47,7 +47,7 @@ def test_dump_exclusion():
             "vw": 100,
         },
     )
-    ubs = UniformBarSet(symbol="AAPL", horizon=Horizon.DAILY, bars=[bar])
+    ubs = UniformBarSet(symbol="AAPL", horizon=Horizon.DAILY, initial_bars=[bar])
 
     # Exclude bars
     dump = ubs.model_dump(exclude={"bars"})

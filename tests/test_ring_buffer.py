@@ -1,7 +1,7 @@
 import pytest
 import pandas as pd
 from datetime import timedelta
-from silkroad.core.base_models import UniformBarSet, Horizon
+from silkroad.core.data_models import UniformBarSet, Horizon
 from alpaca.data.models import Bar
 
 
@@ -34,7 +34,9 @@ def test_ring_buffer_initialization(start_time):
     ]
 
     # Init with max_bars=5
-    ubs = UniformBarSet(symbol=symbol, horizon=Horizon.MINUTE, bars=bars, max_bars=5)
+    ubs = UniformBarSet(
+        symbol=symbol, horizon=Horizon.MINUTE, initial_bars=bars, max_bars=5
+    )
 
     assert len(ubs) == 5
     # Should have kept the last 5 bars
@@ -50,7 +52,9 @@ def test_ring_buffer_push(start_time):
     ]
 
     # Init with max_bars=5 (full)
-    ubs = UniformBarSet(symbol=symbol, horizon=Horizon.MINUTE, bars=bars, max_bars=5)
+    ubs = UniformBarSet(
+        symbol=symbol, horizon=Horizon.MINUTE, initial_bars=bars, max_bars=5
+    )
     assert len(ubs) == 5
 
     # Push new bar
@@ -73,7 +77,7 @@ def test_infinite_capacity(start_time):
     ]
 
     # Init with max_bars=None
-    ubs = UniformBarSet(symbol=symbol, horizon=Horizon.MINUTE, bars=bars)
+    ubs = UniformBarSet(symbol=symbol, horizon=Horizon.MINUTE, initial_bars=bars)
 
     new_bar = create_dummy_bar(symbol, start_time + timedelta(minutes=5), 105)
     ubs.push(new_bar)

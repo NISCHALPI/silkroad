@@ -1,7 +1,7 @@
 import pytest
 import pandas as pd
 from datetime import timedelta
-from silkroad.core.base_models import UniformBarSet, UniformBarCollection, Horizon
+from silkroad.core.data_models import UniformBarSet, UniformBarCollection, Horizon
 from alpaca.data.models import Bar
 
 
@@ -37,8 +37,8 @@ def test_collection_compatibility(start_time):
         for i in range(5)
     ]
 
-    ubs1 = UniformBarSet(symbol="AAPL", horizon=Horizon.MINUTE, bars=bars1)
-    ubs2 = UniformBarSet(symbol="GOOGL", horizon=Horizon.MINUTE, bars=bars2)
+    ubs1 = UniformBarSet(symbol="AAPL", horizon=Horizon.MINUTE, initial_bars=bars1)
+    ubs2 = UniformBarSet(symbol="GOOGL", horizon=Horizon.MINUTE, initial_bars=bars2)
 
     # Initialize Collection
     collection = UniformBarCollection(bar_map={"AAPL": ubs1, "GOOGL": ubs2})
@@ -57,8 +57,12 @@ def test_collection_compatibility(start_time):
     new_bar2 = create_dummy_bar("GOOGL", start_time + timedelta(minutes=5), 205)
 
     new_bars = {
-        "AAPL": UniformBarSet(symbol="AAPL", horizon=Horizon.MINUTE, bars=[new_bar1]),
-        "GOOGL": UniformBarSet(symbol="GOOGL", horizon=Horizon.MINUTE, bars=[new_bar2]),
+        "AAPL": UniformBarSet(
+            symbol="AAPL", horizon=Horizon.MINUTE, initial_bars=[new_bar1]
+        ),
+        "GOOGL": UniformBarSet(
+            symbol="GOOGL", horizon=Horizon.MINUTE, initial_bars=[new_bar2]
+        ),
     }
 
     collection.push(new_bars)
@@ -77,7 +81,7 @@ def test_collection_caching(start_time):
         create_dummy_bar("AAPL", start_time + timedelta(minutes=i), 100 + i)
         for i in range(5)
     ]
-    ubs = UniformBarSet(symbol="AAPL", horizon=Horizon.MINUTE, bars=bars)
+    ubs = UniformBarSet(symbol="AAPL", horizon=Horizon.MINUTE, initial_bars=bars)
     collection = UniformBarCollection(bar_map={"AAPL": ubs})
 
     # First access - should cache
@@ -92,7 +96,11 @@ def test_collection_caching(start_time):
     # Push - should invalidate
     new_bar = create_dummy_bar("AAPL", start_time + timedelta(minutes=5), 105)
     collection.push(
-        {"AAPL": UniformBarSet(symbol="AAPL", horizon=Horizon.MINUTE, bars=[new_bar])}
+        {
+            "AAPL": UniformBarSet(
+                symbol="AAPL", horizon=Horizon.MINUTE, initial_bars=[new_bar]
+            )
+        }
     )
     assert collection._df_cache is None
 

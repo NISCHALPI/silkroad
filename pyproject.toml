@@ -39,3 +39,6 @@ dev = [
     "nbformat>=5.10.4",
     "pytest>=9.0.1",
 ]
+
+[tool.ty.rules]
+index-out-of-bounds = "ignore"

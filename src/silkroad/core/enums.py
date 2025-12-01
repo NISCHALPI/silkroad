@@ -51,9 +51,9 @@ class Horizon(Enum):
             Pandas frequency string (e.g., 'D', 'W', 'M').
         """
         mapping = {
-            Horizon.SECONDS: "S",
-            Horizon.MINUTE: "T",
-            Horizon.HOURLY: "H",
+            Horizon.SECONDS: "s",
+            Horizon.MINUTE: "min",
+            Horizon.HOURLY: "h",
             Horizon.DAILY: "D",
             Horizon.WEEKLY: "W",
             Horizon.MONTHLY: "M",

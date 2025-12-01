@@ -1,7 +1,7 @@
 import pytest
 import pandas as pd
 from datetime import datetime, timedelta, timezone
-from silkroad.core.base_models import UniformBarSet, Horizon
+from silkroad.core.data_models import UniformBarSet, Horizon
 from alpaca.data.models import Bar
 
 
@@ -40,7 +40,7 @@ def sample_bars(symbol, start_time):
 
 
 def test_initialization(symbol, sample_bars):
-    ubs = UniformBarSet(symbol=symbol, horizon=Horizon.MINUTE, bars=sample_bars)
+    ubs = UniformBarSet(symbol=symbol, horizon=Horizon.MINUTE, initial_bars=sample_bars)
     assert len(ubs) == 5
     assert len(ubs._df) == 5
     assert len(ubs._buffer) == 0
@@ -49,7 +49,7 @@ def test_initialization(symbol, sample_bars):
 
 
 def test_push(symbol, sample_bars, start_time):
-    ubs = UniformBarSet(symbol=symbol, horizon=Horizon.MINUTE, bars=sample_bars)
+    ubs = UniformBarSet(symbol=symbol, horizon=Horizon.MINUTE, initial_bars=sample_bars)
     new_bar = create_dummy_bar(symbol, start_time + timedelta(minutes=5), 105)
 
     ubs.push(new_bar)
@@ -61,7 +61,7 @@ def test_push(symbol, sample_bars, start_time):
 
 
 def test_dataframe_access(symbol, sample_bars, start_time):
-    ubs = UniformBarSet(symbol=symbol, horizon=Horizon.MINUTE, bars=sample_bars)
+    ubs = UniformBarSet(symbol=symbol, horizon=Horizon.MINUTE, initial_bars=sample_bars)
     new_bar = create_dummy_bar(symbol, start_time + timedelta(minutes=5), 105)
     ubs.push(new_bar)
 
@@ -75,7 +75,7 @@ def test_dataframe_access(symbol, sample_bars, start_time):
 
 
 def test_pop(symbol, sample_bars, start_time):
-    ubs = UniformBarSet(symbol=symbol, horizon=Horizon.MINUTE, bars=sample_bars)
+    ubs = UniformBarSet(symbol=symbol, horizon=Horizon.MINUTE, initial_bars=sample_bars)
     new_bar = create_dummy_bar(symbol, start_time + timedelta(minutes=5), 105)
     ubs.push(new_bar)
 
@@ -107,7 +107,9 @@ def test_resample(symbol, start_time):
         create_dummy_bar(symbol, start_time + timedelta(minutes=i), 100 + i)
         for i in range(120)
     ]
-    ubs = UniformBarSet(symbol=symbol, horizon=Horizon.MINUTE, bars=bars_resample)
+    ubs = UniformBarSet(
+        symbol=symbol, horizon=Horizon.MINUTE, initial_bars=bars_resample
+    )
 
     resampled = ubs.resample(Horizon.HOURLY)
 
@@ -137,7 +139,7 @@ def test_empty_initialization(symbol):
 
 
 def test_invalid_push(symbol, sample_bars, start_time):
-    ubs = UniformBarSet(symbol=symbol, horizon=Horizon.MINUTE, bars=sample_bars)
+    ubs = UniformBarSet(symbol=symbol, horizon=Horizon.MINUTE, initial_bars=sample_bars)
 
     # Wrong symbol
     bad_bar = create_dummy_bar("WRONG", start_time + timedelta(minutes=10))

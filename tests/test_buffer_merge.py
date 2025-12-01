@@ -1,7 +1,7 @@
 import pytest
 import pandas as pd
 from datetime import timedelta
-from silkroad.core.base_models import UniformBarSet, Horizon
+from silkroad.core.data_models import UniformBarSet, Horizon
 from alpaca.data.models import Bar
 
 

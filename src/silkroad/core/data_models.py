@@ -29,18 +29,31 @@ from pydantic import (
 from typing import List, Dict, Any, Optional, Union, Annotated, Tuple
 from alpaca.data.models.bars import Bar
 from .enums import Sector, AssetClass, Horizon
-from .types import UniformBarList
+from .dtypes import UniformBarList
 import pandas as pd
-from itertools import product
 from pydantic.functional_validators import BeforeValidator
 import annotated_types as at
 import numpy as np
-
+import jax
+import jax.numpy as jnp
+from ..functional.paths import (
+    geometric_brownian_motion,
+    estimate_drift_and_volatility,
+    estimate_drift_and_volatility,
+    merton_jump_diffusion,
+    estimate_mjd,
+    heston_model,
+    estimate_heston_params,
+    circular_block_bootstrap,
+    stationary_bootstrap,
+    moving_block_bootstrap,
+    estimate_multivariate_gbm_params,
+    multivariate_geometric_brownian_motion,
+)
 
 __all__ = [
     "UniformBarSet",
     "UniformBarCollection",
-    "Asset",
 ]
 
 
@@ -84,10 +97,10 @@ class UniformBarSet(BaseModel):
     _df: pd.DataFrame = PrivateAttr(default_factory=pd.DataFrame)
     _buffer: List[Bar] = PrivateAttr(default_factory=list)
 
-    # Temporary field to handle 'bars' argument in constructor without overriding __init__
+    # Temporary field to handle 'bars' argument in constructor without overriding
     initial_bars: Optional[List[Bar]] = Field(default=None, alias="bars", exclude=True)
 
-    # model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
 
     def model_post_init(self, __context: Any) -> None:
         # Initialize internal storage
@@ -105,10 +118,13 @@ class UniformBarSet(BaseModel):
 
             # Create initial DataFrame
             data_dicts = [bar.model_dump() for bar in validated_bars]
-            self._df = (
-                pd.DataFrame(data_dicts).drop(columns=["symbol"]).set_index("timestamp")
-            )
-            self._df.sort_index(inplace=True)
+            df = pd.DataFrame(data_dicts)
+            if not df.empty:
+                df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+                self._df = df.drop(columns=["symbol"]).set_index("timestamp")
+                self._df.sort_index(inplace=True)
+            else:
+                self._df = pd.DataFrame()
 
             # Clear initial_bars to free memory
             self.initial_bars = None
@@ -242,7 +258,7 @@ class UniformBarSet(BaseModel):
             return UniformBarSet(
                 symbol=self.symbol,
                 horizon=self.horizon,
-                bars=sliced_bars,
+                initial_bars=sliced_bars,
                 buffer_limit=self.buffer_limit,
                 max_bars=self.max_bars,
             )
@@ -253,10 +269,11 @@ class UniformBarSet(BaseModel):
             return
 
         buffer_dicts = [bar.model_dump() for bar in self._buffer]
-        buffer_df = (
-            pd.DataFrame(buffer_dicts).drop(columns=["symbol"]).set_index("timestamp")
-        )
-        self._df = pd.concat([self._df, buffer_df])
+        buffer_df = pd.DataFrame(buffer_dicts)
+        if not buffer_df.empty:
+            buffer_df["timestamp"] = pd.to_datetime(buffer_df["timestamp"], utc=True)
+            buffer_df = buffer_df.drop(columns=["symbol"]).set_index("timestamp")
+            self._df = pd.concat([self._df, buffer_df])
         self._buffer = []
 
     def push(self, bar: Bar) -> None:
@@ -385,7 +402,7 @@ class UniformBarSet(BaseModel):
         return UniformBarSet(
             symbol=self.symbol,
             horizon=new_horizon,
-            bars=bars,
+            initial_bars=bars,
             buffer_limit=self.buffer_limit,
             max_bars=self.max_bars,
         )
@@ -522,7 +539,7 @@ class UniformBarSet(BaseModel):
         return UniformBarSet(
             symbol=self.symbol,
             horizon=self.horizon,
-            bars=bars,
+            initial_bars=bars,
             buffer_limit=self.buffer_limit,
             max_bars=self.max_bars,
         )
@@ -555,6 +572,219 @@ class UniformBarSet(BaseModel):
 
         # Return intersected versions of all input bar sets
         return [first] + [bar_set.intersect(first) for bar_set in bar_sets[1:]]
+
+    @staticmethod
+    def constant_like(
+        reference: "UniformBarSet", constant_value: float = 1.0
+    ) -> "UniformBarSet":
+        """Create a UniformBarSet with constant OHLCV values matching the reference's timestamps.
+
+        Used sometimes in strategy modeling to create a baseline or neutral asset representation.
+        This could be used as a cash asset where price doesn't change over time.
+
+        Args:
+            reference: Reference UniformBarSet to match timestamps and horizon.
+            constant_value: Constant value to set for OHLCV fields.
+
+        Returns:
+            New UniformBarSet with constant OHLCV values.
+        """
+        bars = []
+        for timestamp in reference.df.index:
+            data = {
+                "t": timestamp,
+                "o": constant_value,
+                "h": constant_value,
+                "l": constant_value,
+                "c": constant_value,
+                "v": 0,
+                "n": 0,
+                "vw": constant_value,
+            }
+            bars.append(Bar(symbol=reference.symbol, raw_data=data))  # type: ignore
+        return UniformBarSet(
+            symbol=reference.symbol,
+            horizon=reference.horizon,
+            initial_bars=bars,
+            buffer_limit=reference.buffer_limit,
+            max_bars=reference.max_bars,
+        )
+
+    def sample(
+        self,
+        n_paths: int,
+        method: str = "gbm",
+        key: Optional[Union[int, Any]] = None,
+        **kwargs,
+    ) -> List["UniformBarSet"]:
+        """Generate synthetic price paths using Monte Carlo simulation.
+
+        Args:
+            n_paths: Number of independent paths to generate.
+            n_steps: Number of time steps to simulate (including initial state).
+            method: Sampling method. Options:
+                - 'gbm': Geometric Brownian Motion
+                - 'heston': Heston Stochastic Volatility
+                - 'mjd': Merton Jump Diffusion
+                - 'mbb': Moving Block Bootstrap
+                - 'cbb': Circular Block Bootstrap
+                - 'sb': Stationary Bootstrap
+            key: Random seed (int) or JAX PRNG key. If None, uses seed 42.
+            **kwargs: Model-specific parameters. If not provided, parameters
+                are estimated from historical data.
+
+        Returns:
+            List of UniformBarSet objects, each representing a synthetic path.
+        """
+        if key is None:
+            key = jax.random.PRNGKey(42)
+        elif isinstance(key, int):
+            key = jax.random.PRNGKey(key)
+
+        # Prepare data for estimation/bootstrapping
+        if self.df.empty:
+            raise ValueError("Cannot sample from empty UniformBarSet.")
+
+        prices = jnp.array(self.df["close"].values)
+        if len(prices) < 2:
+            raise ValueError("Insufficient history for sampling.")
+
+        # Set n_steps to match current history length
+        n_steps = len(prices)
+
+        # Default dt to daily (1/252) if not provided
+        dt = 1 / self.horizon.periods_annually()
+
+        # Start from the beginning of the history for alternative paths
+        init_price = prices[0]
+
+        # Dispatch to sampling function
+        if method == "gbm":
+            if "drift" not in kwargs or "volatility" not in kwargs:
+                est = estimate_drift_and_volatility(prices, dt)
+                kwargs.update(est)
+
+            paths = geometric_brownian_motion(
+                n_paths=n_paths,
+                n_steps=n_steps,
+                init_price=init_price,  # type: ignore
+                dt=dt,
+                key=key,
+                **kwargs,
+            )
+
+        elif method == "heston":
+            if "mu" not in kwargs:
+                est = estimate_heston_params(prices, dt)
+                kwargs.update(est)
+
+            # Remove init_price from kwargs if present to avoid multiple values error
+            if "init_price" in kwargs:
+                kwargs.pop("init_price")
+
+            paths, _ = heston_model(
+                n_paths=n_paths,
+                n_steps=n_steps,
+                init_price=init_price,  # type: ignore
+                dt=dt,
+                key=key,
+                **kwargs,
+            )
+
+        elif method == "mjd":
+            if "lambda_jump" not in kwargs:
+                est = estimate_mjd(prices, dt)
+                kwargs.update(est)
+
+            # Rename 'sigma' to 'volatility' if present (mismatch between estimate_mjd and merton_jump_diffusion)
+            if "sigma" in kwargs:
+                kwargs["volatility"] = kwargs.pop("sigma")
+
+            # Remove init_price from kwargs if present
+            if "init_price" in kwargs:
+                kwargs.pop("init_price")
+
+            paths = merton_jump_diffusion(
+                n_paths=n_paths,
+                n_steps=n_steps,
+                init_price=init_price,  # type: ignore
+                dt=dt,
+                key=key,
+                **kwargs,
+            )
+
+        elif method in ["mbb", "cbb", "sb"]:
+            log_returns = jnp.diff(jnp.log(prices))
+
+            if method == "mbb":
+                if "block_size" not in kwargs:
+                    kwargs["block_size"] = int(jnp.sqrt(len(log_returns)))
+                paths = moving_block_bootstrap(
+                    n_paths=n_paths,
+                    n_steps=n_steps,
+                    init_price=init_price,
+                    log_returns=log_returns,
+                    key=key,
+                    **kwargs,
+                )
+            elif method == "cbb":
+                if "block_size" not in kwargs:
+                    kwargs["block_size"] = int(jnp.sqrt(len(log_returns)))
+                paths = circular_block_bootstrap(
+                    n_paths=n_paths,
+                    n_steps=n_steps,
+                    init_price=init_price,
+                    log_returns=log_returns,
+                    key=key,
+                    **kwargs,
+                )
+            elif method == "sb":
+                paths = stationary_bootstrap(
+                    n_paths=n_paths,
+                    n_steps=n_steps,
+                    init_price=init_price,
+                    log_returns=log_returns,
+                    key=key,
+                    **kwargs,
+                )
+        else:
+            raise ValueError(f"Unknown sampling method: {method}")
+
+        # Convert JAX paths to List[UniformBarSet]
+        # Use existing timestamps
+        timestamps = self.df.index
+
+        paths_np = np.array(paths)
+        result_sets = []
+
+        for i in range(n_paths):
+            path_prices = paths_np[i]
+            bars = []
+            for t, price in zip(timestamps, path_prices):
+                # Create synthetic bar with O=H=L=C=price
+                data = {
+                    "t": t,
+                    "o": price,
+                    "h": price,
+                    "l": price,
+                    "c": price,
+                    "v": 0,
+                    "n": 0,
+                    "vw": price,
+                }
+                bars.append(Bar(symbol=self.symbol, raw_data=data))
+
+            result_sets.append(
+                UniformBarSet(
+                    symbol=self.symbol,
+                    horizon=self.horizon,
+                    initial_bars=bars,
+                    buffer_limit=self.buffer_limit,
+                    max_bars=self.max_bars,
+                )
+            )
+
+        return result_sets
 
 
 # Define CompatibleUniformBarMap type alias
@@ -825,7 +1055,7 @@ class UniformBarCollection(BaseModel):
                 symbol: UniformBarSet(
                     symbol=bar_set.symbol,
                     horizon=bar_set.horizon,
-                    bars=bar_set.bars[index],
+                    initial_bars=bar_set.bars[index],
                     buffer_limit=bar_set.buffer_limit,
                     max_bars=bar_set.max_bars,
                 )
@@ -851,62 +1081,220 @@ class UniformBarCollection(BaseModel):
         """
         return self.df.index.get_level_values("timestamp").unique()
 
+    def sample(
+        self,
+        n_paths: int,
+        method: str = "gbm",
+        key: Optional[Union[int, Any]] = None,
+        **kwargs,
+    ) -> List["UniformBarCollection"]:
+        """Generate synthetic portfolio paths (scenarios).
 
-class Asset(BaseModel):
-    """Base representation of a financial asset with metadata.
-
-    This class provides the foundational structure for representing any financial asset,
-    including their classification, sector assignment, and optional metadata. It is designed
-    to be generic and extensible, serving as a base class for specific asset types (stocks,
-    bonds, options, futures, cryptocurrencies, etc.).
-
-    Assets are uniquely identified by their symbol and can be used in sets and dictionaries.
-    Two assets are considered equal if they share the same symbol, regardless of other
-    attributes. This design allows for flexible asset management in portfolio construction
-    and analysis.
-
-    The metadata field provides extensibility for asset-specific attributes without requiring
-    subclassing, making it easy to add custom fields as needed for different use cases.
-
-    Attributes:
-        symbol: Ticker symbol of the asset (e.g., "AAPL", "GOOGL", "BTC-USD").
-        asset_class: Classification of the asset (e.g., STOCK, BOND, CRYPTOCURRENCY).
-        sector: Sector to which the asset belongs (e.g., TECHNOLOGY, HEALTHCARE).
-        name: Full name of the asset (e.g., "Apple Inc."). Optional.
-        exchange: Exchange where the asset is traded (e.g., "NASDAQ"). Optional.
-        metadata: Additional custom metadata about the asset. Optional.
-    """
-
-    symbol: str
-    asset_class: AssetClass
-    sector: Sector
-    name: Optional[str] = None
-    exchange: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
-
-    def __str__(self) -> str:
-        return f"{self.symbol} ({self.asset_class.name}, {self.sector.name})"
-
-    def __eq__(self, other: object) -> bool:
-        """Check equality based on symbol.
+        Sampling method can be parametric (independent assets) or
+        non-parametric (bootstrapping, preserves correlations).
+        Here are the current options:
+            - 'gbm': Geometric Brownian Motion (independent assets)
+            - 'heston': Heston Stochastic Volatility (independent assets)
+            - 'mjd': Merton Jump Diffusion (independent assets)
+            - 'mbb': Moving Block Bootstrap (multivariate)
+            - 'cbb': Circular Block Bootstrap (multivariate)
+            - 'sb': Stationary Bootstrap (multivariate)
 
         Args:
-            other: Object to compare with.
+            n_paths: Number of independent scenarios to generate.
+            n_steps: Number of time steps to simulate.
+            method: Sampling method.
+            key: Random seed (int) or JAX PRNG key.
+            **kwargs: Method-specific parameters.
 
         Returns:
-            True if both assets have the same symbol.
-
-        Raises:
-            NotImplementedError: If comparing with a non-Asset object.
+            List of UniformBarCollection objects, each representing a scenario.
         """
-        if not isinstance(other, Asset):
-            raise NotImplementedError(f"Cannot compare Asset with {type(other)}")
-        return self.symbol == other.symbol
+        if key is None:
+            key = jax.random.key(42)
+        elif isinstance(key, int):
+            key = jax.random.key(key)
 
-    def __hash__(self) -> int:
-        """Generate hash based on symbol for use in sets and dicts.
+        # Check if bootstrapping (supports multivariate inherently)
+        if method in ["mbb", "cbb", "sb"]:
+            # Prepare multivariate log returns (T, N_assets)
+            close_df = self.close
+            # Calculate log returns
+            log_returns_df = (np.log(close_df) - np.log(close_df.shift(1))).dropna()  # type: ignore
 
-        Returns:
-            Hash value of the symbol.
-        """
-        return hash(self.symbol)
+            if log_returns_df.empty:
+                raise ValueError("Insufficient history for sampling.")
+
+            # Convert to JAX array
+            log_returns = jnp.array(log_returns_df.values)
+
+            # Determine n_steps from existing data
+            n_steps = self.n_bars
+
+            # Init prices (N_assets,) - Start from beginning
+            init_prices = jnp.array(close_df.iloc[0].values)
+
+            # Dispatch
+            if method == "mbb":
+                if "block_size" not in kwargs:
+                    kwargs["block_size"] = int(jnp.sqrt(len(log_returns)))
+                paths = moving_block_bootstrap(
+                    n_paths=n_paths,
+                    n_steps=n_steps,
+                    init_price=init_prices,
+                    log_returns=log_returns,
+                    key=key,
+                    **kwargs,
+                )
+            elif method == "cbb":
+                if "block_size" not in kwargs:
+                    kwargs["block_size"] = int(jnp.sqrt(len(log_returns)))
+                paths = circular_block_bootstrap(
+                    n_paths=n_paths,
+                    n_steps=n_steps,
+                    init_price=init_prices,
+                    log_returns=log_returns,
+                    key=key,
+                    **kwargs,
+                )
+            elif method == "sb":
+                paths = stationary_bootstrap(
+                    n_paths=n_paths,
+                    n_steps=n_steps,
+                    init_price=init_prices,
+                    log_returns=log_returns,
+                    key=key,
+                    **kwargs,
+                )
+
+            # paths shape: (n_paths, n_steps, N_assets)
+            # Reconstruct List[UniformBarCollection]
+
+            # paths shape: (n_paths, n_steps, N_assets)
+            # Reconstruct List[UniformBarCollection]
+
+            timestamps = close_df.index
+
+            paths_np = np.array(paths)
+            symbols = list(close_df.columns)
+
+            collections = []
+            for i in range(n_paths):
+                bar_map = {}
+                for j, symbol in enumerate(symbols):
+                    asset_prices = paths_np[i, :, j]
+                    bars = []
+                    for t, price in zip(timestamps, asset_prices):
+                        data = {
+                            "t": t,
+                            "o": price,
+                            "h": price,
+                            "l": price,
+                            "c": price,
+                            "v": 0,
+                            "n": 0,
+                            "vw": price,
+                        }
+                        bars.append(Bar(symbol=symbol, raw_data=data))
+
+                    bar_map[symbol] = UniformBarSet(
+                        symbol=symbol, horizon=self.horizon, bars=bars  # type: ignore
+                    )
+                collections.append(UniformBarCollection(bar_map=bar_map))
+
+            return collections
+
+        elif method == "gbm":
+            # Multivariate GBM (Preserves correlations)
+            # Prepare multivariate log returns (T, N_assets)
+            close_df = self.close
+
+            # Check for sufficient history
+            if len(close_df) < 2:
+                raise ValueError("Insufficient history for sampling.")
+
+            # Convert to JAX array
+            # We need prices for estimation
+            prices = jnp.array(close_df.values)
+
+            # Determine n_steps from existing data
+            n_steps = self.n_bars
+
+            # Init prices (N_assets,) - Start from beginning
+            init_prices = jnp.array(close_df.iloc[0].values)
+
+            # Default dt
+            dt = 1 / self.horizon.periods_annually()
+
+            # Estimate parameters if not provided
+            if "drift" not in kwargs or "cov_matrix" not in kwargs:
+                est = estimate_multivariate_gbm_params(prices, dt)
+                kwargs.update(est)
+
+            # Generate paths
+            # Shape: (n_paths, n_steps, n_assets)
+            paths = multivariate_geometric_brownian_motion(
+                n_paths=n_paths,
+                n_steps=n_steps,
+                init_prices=init_prices,
+                dt=dt,
+                key=key,
+                **kwargs,
+            )
+
+            # Reconstruct List[UniformBarCollection]
+            timestamps = close_df.index
+            paths_np = np.array(paths)
+            symbols = list(close_df.columns)
+
+            collections = []
+            for i in range(n_paths):
+                bar_map = {}
+                for j, symbol in enumerate(symbols):
+                    asset_prices = paths_np[i, :, j]
+                    bars = []
+                    for t, price in zip(timestamps, asset_prices):
+                        data = {
+                            "t": t,
+                            "o": price,
+                            "h": price,
+                            "l": price,
+                            "c": price,
+                            "v": 0,
+                            "n": 0,
+                            "vw": price,
+                        }
+                        bars.append(Bar(symbol=symbol, raw_data=data))
+
+                    bar_map[symbol] = UniformBarSet(
+                        symbol=symbol, horizon=self.horizon, bars=bars  # type: ignore
+                    )
+                collections.append(UniformBarCollection(bar_map=bar_map))
+
+            return collections
+
+        else:
+            # Other Parametric methods (Heston, MJD): Sample each asset independently
+            # Note: This does NOT preserve correlations for these models yet.
+
+            asset_samples = {}  # symbol -> List[UniformBarSet]
+            keys = jax.random.split(key, len(self.symbols))
+
+            for i, symbol in enumerate(self.symbols):
+                bar_set = self.bar_map[symbol]
+                asset_samples[symbol] = bar_set.sample(
+                    n_paths=n_paths,
+                    method=method,
+                    key=keys[i],
+                    **kwargs,
+                )
+
+            # Reassemble
+            collections = []
+            for i in range(n_paths):
+                bar_map = {
+                    symbol: samples[i] for symbol, samples in asset_samples.items()
+                }
+                collections.append(UniformBarCollection(bar_map=bar_map))
+
+            return collections

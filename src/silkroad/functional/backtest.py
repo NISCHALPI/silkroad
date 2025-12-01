@@ -9,7 +9,19 @@ from typing import Tuple, Union, Dict
 import jax
 import jax.numpy as jnp
 from functools import partial
-from .metrics import sharpe_ratio, max_drawdown, sortino_ratio
+from .metrics import (
+    sharpe_ratio,
+    max_drawdown,
+    sortino_ratio,
+    calmar_ratio,
+    omega_ratio,
+    CVaR,
+    VaR,
+    annulized_volatility,
+    expected_annualized_return,
+    ulcer_index,
+    tail_ratio,
+)
 
 __all__ = [
     "backtest",
@@ -204,7 +216,8 @@ def backtest_with_metrics(
     rebalance_mask: Union[None, jax.Array] = None,
     risk_free_rate: float = 0.0,
     periods_per_year: Union[int, float] = 252,
-) -> Dict[str, jax.Array]:
+    alpha: float = 0.05,
+) -> Dict[str, Union[float, jax.Array]]:
     """Runs backtest and computes performance metrics.
 
     This function runs the backtest simulation and computes key performance metrics
@@ -225,6 +238,8 @@ def backtest_with_metrics(
             Defaults to 0.0.
         periods_per_year: An integer representing the number of periods per year for
             annualizing metrics. Defaults to 252 (trading days).
+        alpha: A float representing the significance level for VaR and CVaR calculations.
+            Defaults to 0.05.
 
     Returns:
         A dictionary containing the final portfolio value, weights, and performance metrics:
@@ -250,19 +265,33 @@ def backtest_with_metrics(
         transaction_cost_bp=transaction_cost_bp,
         rebalance_mask=rebalance_mask,
     )
-    # Compute performance metrics
-    # returns_history is now log returns, so we can pass it directly to metrics
+    # Compute performance metrics from returns history
     sharpe = sharpe_ratio(
-        returns_history,
-        risk_free_rate,
-        periods_per_year,
+        returns=returns_history,
+        risk_free_rate=risk_free_rate,
+        periods=periods_per_year,
     )
     sortino = sortino_ratio(
-        returns_history,
-        risk_free_rate,
-        periods_per_year,
+        returns=returns_history,
+        minimum_acceptable_return=risk_free_rate,
+        periods=periods_per_year,
     )
-    mdd = max_drawdown(returns_history)
+    mdd = max_drawdown(returns=returns_history)
+    calmar = calmar_ratio(
+        returns=returns_history,
+        periods=periods_per_year,
+    )
+    omega = omega_ratio(
+        returns=returns_history, threshold=risk_free_rate, periods=periods_per_year
+    )
+    cvar = CVaR(returns=returns_history, alpha=alpha)
+    var = VaR(returns=returns_history, alpha=alpha)
+    ann_vol = annulized_volatility(returns=returns_history, periods=periods_per_year)
+    exp_ret = expected_annualized_return(
+        returns=returns_history, periods=periods_per_year
+    )
+    ulcer = ulcer_index(returns=returns_history)
+    tail = tail_ratio(returns=returns_history)
 
     return {
         "final_value": r_final_value,
@@ -274,4 +303,12 @@ def backtest_with_metrics(
         "sharpe_ratio": sharpe,
         "sortino_ratio": sortino,
         "max_drawdown": mdd,
+        "calmar_ratio": calmar,
+        "omega_ratio": omega,
+        "CVaR": cvar,
+        "VaR": var,
+        "annualized_volatility": ann_vol,
+        "expected_annualized_return": exp_ret,
+        "ulcer_index": ulcer,
+        "tail_ratio": tail,
     }
