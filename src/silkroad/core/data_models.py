@@ -28,7 +28,7 @@ from pydantic import (
 )
 from typing import List, Dict, Any, Optional, Union, Annotated, Tuple
 from alpaca.data.models.bars import Bar
-from .enums import Sector, AssetClass, Horizon
+from .enums import Sector, AssetClass, Horizon, Exchange
 from .dtypes import UniformBarList
 import pandas as pd
 from pydantic.functional_validators import BeforeValidator
@@ -51,10 +51,22 @@ from ..functional.paths import (
     multivariate_geometric_brownian_motion,
 )
 
-__all__ = [
-    "UniformBarSet",
-    "UniformBarCollection",
-]
+__all__ = ["UniformBarSet", "UniformBarCollection", "Asset"]
+
+
+class Asset(BaseModel):
+    ticker: str = Field(..., description="Ticker symbol of the asset.")
+    name: Optional[str] = Field(None, description="Full name of the asset.")
+    asset_class: Optional[AssetClass] = Field(
+        None, description="Asset class of the asset."
+    )
+    sector: Optional[Sector] = Field(None, description="Sector of the asset.")
+    exchange: Optional[Exchange] = Field(
+        None, description="Exchange where the asset is listed."
+    )
+
+    def __str__(self) -> str:
+        return f"Asset(ticker={self.ticker}, name={self.name}, class={self.asset_class}, sector={self.sector}, exchange={self.exchange})"
 
 
 class UniformBarSet(BaseModel):
@@ -199,6 +211,82 @@ class UniformBarSet(BaseModel):
         # We return a new DF, we don't merge into _df here to keep push() fast
         # Merging happens only when we decide to flush buffer (not implemented yet)
         return pd.concat([self._df, buffer_df])
+
+    @property
+    def timestamps(self) -> pd.DatetimeIndex:
+        """Get the timestamps of all bars as a DatetimeIndex.
+
+        Returns:
+            DatetimeIndex of bar timestamps.
+        """
+        return self.df.index  # type: ignore
+
+    @staticmethod
+    def from_df(
+        symbol: str,
+        horizon: Horizon,
+        df: pd.DataFrame,
+        buffer_limit: int = 1000,
+        max_bars: Optional[int] = None,
+    ) -> "UniformBarSet":
+        """Create a UniformBarSet from a DataFrame of OHLCV data.
+
+        Note: The DataFrame must have a timestamp index and columns:
+            - open
+            - high
+            - low
+            - close
+            - volume
+            - trade_count
+            - vwap
+
+        Args:
+            symbol: Ticker symbol of the asset.
+            horizon: Time interval between bars.
+            df: DataFrame with timestamp index and OHLCV columns.
+            buffer_limit: Maximum number of bars in the buffer before merging into DataFrame.
+            max_bars: Maximum number of bars to keep (Ring Buffer mode). If None, infinite capacity.
+
+        Returns:
+            New UniformBarSet instance.
+        """
+        # Validate DataFrame columns
+        required_columns = {
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "trade_count",
+            "vwap",
+        }
+        if not required_columns.issubset(df.columns):
+            missing = required_columns - set(df.columns)
+            raise ValueError(f"DataFrame is missing required columns: {missing}")
+
+        # Convert DataFrame rows to Bar objects
+        df_renamed = df.rename(
+            columns={
+                "open": "o",
+                "high": "h",
+                "low": "l",
+                "close": "c",
+                "volume": "v",
+                "trade_count": "n",
+                "vwap": "vw",
+            }
+        )
+        df_renamed.index.name = "t"
+        records = df_renamed.reset_index().to_dict(orient="records")
+        bars = [Bar(symbol=symbol, raw_data=record) for record in records]  # type: ignore
+
+        return UniformBarSet(
+            symbol=symbol,
+            horizon=horizon,
+            initial_bars=bars,
+            buffer_limit=buffer_limit,
+            max_bars=max_bars,
+        )
 
     def __repr__(self) -> str:
         return f"UniformBarSet(symbol={self.symbol}, timeframe={self.horizon.name}, bars={len(self)})"
@@ -962,6 +1050,23 @@ class UniformBarCollection(BaseModel):
                 f"UniformBarSet with symbol {symbol} not found in the collection."
             )
         return self.bar_map[symbol]
+
+    def get_subcollection(self, symbols: List[str]) -> "UniformBarCollection":
+        """Create a sub-collection containing only specified asset symbols.
+
+        Args:
+            symbols: List of ticker symbols to include in the sub-collection.
+        Returns:
+            UniformBarCollection with only the specified assets.
+        Raises:
+            KeyError: If any symbol is not found in the collection.
+        """
+        if not all(symbol in self.bar_map for symbol in symbols):
+            missing = [s for s in symbols if s not in self.bar_map]
+            raise KeyError(f"Symbols not found in the collection: {missing}")
+
+        sub_bar_map = {symbol: self.bar_map[symbol] for symbol in symbols}
+        return UniformBarCollection(bar_map=sub_bar_map)
 
     def push(self, new_bars: Dict[str, UniformBarSet]) -> None:
         """Add new bars to existing bar sets in the collection.

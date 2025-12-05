@@ -1,6 +1,6 @@
 """Core data structures for time series analysis."""
 
-from .data_models import UniformBarCollection, UniformBarSet
+from .data_models import UniformBarCollection, UniformBarSet, Asset
 from .enums import Horizon, AssetClass, Sector, Exchange
 
 from .strategy_models import Strategy, BuyAndHoldStrategy, RiskfolioStrategy
@@ -15,4 +15,5 @@ __all__ = [
     "Strategy",
     "BuyAndHoldStrategy",
     "RiskfolioStrategy",
+    "Asset",
 ]

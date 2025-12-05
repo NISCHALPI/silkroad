@@ -104,32 +104,31 @@ class DataBackend(Enum):
 
 
 class AssetClass(Enum):
-    """Asset class types."""
+    """Asset classes."""
 
     STOCK = 0
     BOND = 1
     COMMODITY = 2
-    FOREX = 3
-    CRYPTOCURRENCY = 4
-    REAL_ESTATE = 5
-    OTHER = -1
+    CRYPTO = 3
+    REAL_ESTATE = 4
+    CASH = 5
 
 
 class Sector(Enum):
-    """Industry sectors."""
+    """GICS Sectors for Equities."""
 
     TECHNOLOGY = 0
     HEALTHCARE = 1
     FINANCIALS = 2
-    CONSUMER_DISCRETIONARY = 3
-    CONSUMER_STAPLES = 4
+    CONSUMER_DISC = 3  # Discretionary
+    CONSUMER_STAP = 4  # Staples
     ENERGY = 5
     UTILITIES = 6
     INDUSTRIALS = 7
     MATERIALS = 8
     REAL_ESTATE = 9
-    COMMUNICATION_SERVICES = 10
-    OTHER = -1
+    COMM_SERVICES = 10
+    NONE = -1  # Use this for Assets that don't have a sector (like Cash/Crypto)
 
 
 class Exchange(Enum):

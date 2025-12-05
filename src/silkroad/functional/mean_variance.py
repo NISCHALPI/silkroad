@@ -36,7 +36,7 @@ def mean_variance_optimization(
     cov: np.ndarray,
     target_return: float,
     short_selling: bool = False,
-) -> tp.Dict[str, tp.Union[np.ndarray, float, str]]:
+) -> tp.Dict[str, tp.Any]:
     r"""Solve a mean-variance optimization problem.
 
     The optimization is the Markowitz quadratic program:
