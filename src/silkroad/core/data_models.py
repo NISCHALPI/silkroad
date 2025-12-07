@@ -28,15 +28,15 @@ from pydantic import (
 )
 from typing import List, Dict, Any, Optional, Union, Annotated, Tuple
 from alpaca.data.models.bars import Bar
-from .enums import Sector, AssetClass, Horizon, Exchange
-from .dtypes import UniformBarList
+from silkroad.core.enums import Sector, AssetClass, Horizon, Exchange
+from silkroad.core.dtypes import UniformBarList
 import pandas as pd
 from pydantic.functional_validators import BeforeValidator
 import annotated_types as at
 import numpy as np
 import jax
 import jax.numpy as jnp
-from ..functional.paths import (
+from silkroad.functional.paths import (
     geometric_brownian_motion,
     estimate_drift_and_volatility,
     estimate_drift_and_volatility,
@@ -57,12 +57,15 @@ __all__ = ["UniformBarSet", "UniformBarCollection", "Asset"]
 class Asset(BaseModel):
     ticker: str = Field(..., description="Ticker symbol of the asset.")
     name: Optional[str] = Field(None, description="Full name of the asset.")
-    asset_class: Optional[AssetClass] = Field(
-        None, description="Asset class of the asset."
+    asset_class: AssetClass = Field(
+        AssetClass.STOCK, description="Asset class of the asset."
     )
-    sector: Optional[Sector] = Field(None, description="Sector of the asset.")
-    exchange: Optional[Exchange] = Field(
-        None, description="Exchange where the asset is listed."
+    sector: Sector = Field(Sector.OTHERS, description="Sector of the asset.")
+    exchange: Exchange = Field(
+        Exchange.OTHER, description="Exchange where the asset is listed."
+    )
+    classifications: Optional[Dict[str, Any]] = Field(
+        None, description="Additional classification key-value pairs."
     )
 
     def __str__(self) -> str:
@@ -448,7 +451,7 @@ class UniformBarSet(BaseModel):
             ValueError: If new_horizon is smaller than or equal to current horizon.
         """
         # Check if the new horizon is greater than the current horizon
-        if new_horizon.value <= self.horizon.value:
+        if new_horizon.to_pandas_timedelta() <= self.horizon.to_pandas_timedelta():
             raise ValueError(
                 "New horizon must be greater than current horizon for resampling."
             )
@@ -1011,7 +1014,7 @@ class UniformBarCollection(BaseModel):
         return log_return_df
 
     @property
-    def arthimetic_returns(self) -> pd.DataFrame:
+    def arithmetic_returns(self) -> pd.DataFrame:
         """Get a DataFrame of arithmetic returns for all assets.
 
         Returns:

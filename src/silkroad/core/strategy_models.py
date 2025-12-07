@@ -14,12 +14,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
-import tqdm
+from rich import progress
 import riskfolio as rp
 
-from .data_models import UniformBarCollection
-from .enums import Horizon
-from ..functional.backtest import backtest_with_metrics
+from silkroad.core.data_models import UniformBarCollection
+from silkroad.core.enums import Horizon
+from silkroad.functional.backtest import backtest_with_metrics
 
 __all__ = ["Strategy", "BuyAndHoldStrategy", "RiskfolioStrategy"]
 
@@ -192,13 +192,15 @@ class RiskfolioStrategy(Strategy):
             DataFrame of weights.
         """
         universe = data
-        returns = universe.arthimetic_returns
+        returns = universe.arithmetic_returns
         weights_list = []
         rebalance_flags = []
 
         warnings.filterwarnings("ignore")
 
-        for i in tqdm.tqdm(range(0, len(returns)), desc="Computing Riskfolio Weights"):
+        for i in progress.track(
+            range(0, len(returns)), description="Computing Riskfolio Weights"
+        ):
             ## We lookupto current time index i and forcast weights for next period
             ## Hence we use returns up to i (inclusive). Normally, in live trading,
             ## we wait till almost the end of period i to compute weights for i+1.

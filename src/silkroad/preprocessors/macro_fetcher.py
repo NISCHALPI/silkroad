@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import yfinance as yf
 from fredapi import Fred
-from ..logger.logger import logger
+from silkroad.logger.logger import logger
 
 
 __all__ = [

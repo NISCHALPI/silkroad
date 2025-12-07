@@ -16,7 +16,7 @@ Key Features:
 Example:
     Basic usage of the MarketDataDB class:
 
-    >>> from silkroad.app.database import MarketDataDB
+    >>> from silkroad.app.db.market_data import MarketDataDB
     >>> from silkroad.core.data_models import Asset, Horizon
     >>> import datetime as dt
     >>>
@@ -41,13 +41,18 @@ import arcticdb as adb
 from pathlib import Path
 import typing as tp
 import datetime as dt
-from ..core.data_models import UniformBarSet, Horizon, Asset, UniformBarCollection
-from ..core.enums import AssetClass
+from silkroad.core.data_models import (
+    UniformBarSet,
+    Horizon,
+    Asset,
+    UniformBarCollection,
+)
+from silkroad.core.enums import AssetClass, Exchange
 from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.data.enums import Adjustment
-from ..logger.logger import logger
+from silkroad.logging.logger import logger
 import pandas as pd
 
 __all__ = ["MarketDataDB"]
@@ -98,7 +103,7 @@ class MarketDataDB:
         DETECT_PERCENTAGE (float): Price change threshold (%) for corporate action detection.
 
     Example:
-        >>> from silkroad.app.database import MarketDataDB
+        >>> from silkroad.app.db.market_data import MarketDataDB
         >>> from silkroad.core.data_models import Asset, Horizon
         >>> import datetime as dt
         >>>
@@ -440,18 +445,25 @@ class MarketDataDB:
             - Data is normalized to UTC-naive format for storage consistency.
             - Metadata is created for each asset tracking source and adjustment check time.
         """
+        # Seperate assets by type and process accordingly
+        logger.debug(f"Starting update with mode: {update_mode}")
+        stock_assets = [
+            a
+            for a in assets
+            if a.asset_class
+            in [AssetClass.STOCK, AssetClass.COMMODITY, AssetClass.REAL_ESTATE]
+            or a.asset_class is None
+        ]
+        crypto_assets = [a for a in assets if a.asset_class == AssetClass.CRYPTO]
+        logger.debug(
+            f"Found {len(stock_assets)} stock/commodity/real estate assets for update."
+        )
+        logger.debug(f"Found {len(crypto_assets)} crypto assets for update.")
+
         if update_mode == "full_refresh":
             # Download from inception (or earliest available date)
             # Alpaca's max history is ~2015 for most stocks
             historical_start = self.ALPACA_START_DATE
-
-            # Separate assets by type
-            stock_assets = [
-                a
-                for a in assets
-                if a.asset_class is None or a.asset_class == AssetClass.STOCK
-            ]
-            crypto_assets = [a for a in assets if a.asset_class == AssetClass.CRYPTO]
 
             # Fetch stock data
             if stock_assets:
@@ -505,13 +517,6 @@ class MarketDataDB:
                 )
 
         elif update_mode == "smart_merge":
-            # Separate assets by type
-            stock_assets = [
-                a
-                for a in assets
-                if a.asset_class is None or a.asset_class == AssetClass.STOCK
-            ]
-            crypto_assets = [a for a in assets if a.asset_class == AssetClass.CRYPTO]
 
             # Merge stock data
             if stock_assets:
@@ -568,14 +573,6 @@ class MarketDataDB:
             logger.warning(
                 "⚠️  Using append_only mode. This may create data inconsistencies if corporate actions occurred!"
             )
-
-            # Separate assets by type
-            stock_assets = [
-                a
-                for a in assets
-                if a.asset_class is None or a.asset_class == AssetClass.STOCK
-            ]
-            crypto_assets = [a for a in assets if a.asset_class == AssetClass.CRYPTO]
 
             # Append stock data
             if stock_assets:
@@ -855,7 +852,9 @@ class MarketDataDB:
             >>> db.refresh(api_key, api_secret, assets)
         """
         if end is None:
-            end = dt.datetime.now(tz=dt.timezone.utc) - dt.timedelta(days=1)
+            end = (
+                Exchange.NYSE.previous_market_close()
+            )  # Default to yesterday's market close
 
         for asset in assets:
             if asset.ticker in self.get_available_tickers():
@@ -1036,8 +1035,7 @@ class MarketDataDB:
         inspection and auditing.
 
         Returns:
-            pd.DataFrame: Summary DataFrame with columns:
-                - 'ticker' (str): Ticker symbol
+            pd.DataFrame: Summary DataFrame with columns and index (ticker):
                 - 'name' (str | None): Asset name from metadata
                 - 'asset_class' (str | None): Asset class from metadata
                 - 'sector' (str | None): Industry sector from metadata

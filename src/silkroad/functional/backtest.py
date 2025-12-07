@@ -9,7 +9,7 @@ from typing import Tuple, Union, Dict
 import jax
 import jax.numpy as jnp
 from functools import partial
-from .metrics import (
+from silkroad.functional.metrics import (
     sharpe_ratio,
     max_drawdown,
     sortino_ratio,

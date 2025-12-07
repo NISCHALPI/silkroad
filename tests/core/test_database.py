@@ -4,8 +4,9 @@ import numpy as np
 import datetime as dt
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-from silkroad.app.database import MarketDataDB
+from silkroad.app.db.market_data import MarketDataDB
 from silkroad.core.data_models import Asset, Horizon, AssetClass, Exchange
+from silkroad.core.enums import Sector
 from alpaca.data.enums import Adjustment
 
 # Fixtures
@@ -23,13 +24,13 @@ def db(temp_db_path):
 
 @pytest.fixture
 def mock_alpaca_stock_client():
-    with patch("silkroad.app.database.StockHistoricalDataClient") as mock:
+    with patch("silkroad.app.db.market_data.StockHistoricalDataClient") as mock:
         yield mock
 
 
 @pytest.fixture
 def mock_alpaca_crypto_client():
-    with patch("silkroad.app.database.CryptoHistoricalDataClient") as mock:
+    with patch("silkroad.app.db.market_data.CryptoHistoricalDataClient") as mock:
         yield mock
 
 
@@ -40,7 +41,7 @@ def sample_asset():
         name="Apple Inc.",
         asset_class=AssetClass.STOCK,
         exchange=Exchange.NASDAQ,
-        sector=None,
+        sector=Sector.TECHNOLOGY,
     )
 
 

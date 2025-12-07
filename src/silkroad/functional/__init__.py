@@ -20,6 +20,6 @@ Example:
     >>> allocs = mean_variance_optimization(returns, target_return=0.01)
 """
 
-from .mean_variance import mean_variance_optimization
+from silkroad.functional.mean_variance import mean_variance_optimization
 
 __all__ = ["mean_variance_optimization"]
