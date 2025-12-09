@@ -1,284 +1,213 @@
-import pytest
 import jax
 import jax.numpy as jnp
-from silkroad.functional.backtest import backtest
+import pytest
+from silkroad.functional.backtest import backtest, state_transition
 
 
-def test_backtest_shapes():
-    T, N = 10, 3
-    init_value = 1000.0
-    init_weights = jnp.array([0.3, 0.3, 0.4])
-    # Returns of shape (T, N)
-    log_returns = jnp.zeros((T, N))
-    target_weights = jnp.ones((T, N)) / N
+@pytest.fixture
+def sample_data():
+    T, N = 10, 2
+    N_0 = jnp.zeros(N)
+    cash_0 = jnp.array(100_000.0)
 
-    final_state, metrics = backtest(
-        init_value, init_weights, log_returns, target_weights
+    # Constant prices for simplicity in some tests
+    open_prices = jnp.ones((T, N)) * 100.0
+    close_prices = jnp.ones((T, N)) * 101.0
+
+    # Equal weights
+    weights = jnp.ones((T, N)) * 0.5
+
+    # Rebalance every step
+    mask = jnp.ones(T)
+
+    # No costs
+    costs_bps = jnp.zeros(T)
+
+    return {
+        "N_0": N_0,
+        "cash_0": cash_0,
+        "open": open_prices,
+        "close": close_prices,
+        "weights": weights,
+        "mask": mask,
+        "costs_bps": costs_bps,
+        "T": T,
+        "N": N,
+    }
+
+
+def test_state_transition_basic():
+    # Initial state: $10k cash, no shares
+    N_prev = jnp.array([0.0, 0.0])
+    cash_prev = jnp.array(10_000.0)
+
+    # Prices: $100 each
+    prices = jnp.array([100.0, 100.0])
+
+    # Target: 50/50
+    weights = jnp.array([0.5, 0.5])
+
+    # Rebalance, no costs
+    mask = jnp.array(1.0)
+    costs = jnp.array(0.0)
+
+    N_new, cash_new, realized_cost = state_transition(
+        N_prev, cash_prev, prices, weights, mask, costs
     )
 
-    final_value, final_weights = final_state
-    returns, transaction_costs, turnover = metrics
+    # Should buy 50 shares of each ($5000 each)
+    expected_shares = jnp.array([50.0, 50.0])
 
-    assert final_value.shape == ()
-    assert final_weights.shape == (N,)
-    assert returns.shape == (T,)
-    assert transaction_costs.shape == (T,)
-    assert turnover.shape == (T,)
+    assert jnp.allclose(N_new, expected_shares)
+    assert jnp.allclose(cash_new, 0.0, atol=1e-5)
+    assert jnp.allclose(realized_cost, 0.0)
 
 
-def test_no_movement():
+def test_state_transition_no_rebalance():
+    N_prev = jnp.array([10.0, 10.0])
+    cash_prev = jnp.array(1000.0)
+    prices = jnp.array([100.0, 100.0])
+    weights = jnp.array([0.8, 0.2])  # Different target
+
+    # Mask = 0 (Hold)
+    mask = jnp.array(0.0)
+    costs = jnp.array(10.0)  # Costs shouldn't matter
+
+    N_new, cash_new, realized_cost = state_transition(
+        N_prev, cash_prev, prices, weights, mask, costs
+    )
+
+    assert jnp.allclose(N_new, N_prev)
+    assert jnp.allclose(cash_new, cash_prev)
+    assert jnp.allclose(realized_cost, 0.0)
+
+
+def test_state_transition_costs():
+    # $10k cash
+    N_prev = jnp.array([0.0])
+    cash_prev = jnp.array(10_000.0)
+    prices = jnp.array([100.0])
+    weights = jnp.array([1.0])
+    mask = jnp.array(1.0)
+
+    # 100 bps = 1% cost
+    costs_bps = jnp.array(100.0)
+
+    # Theoretical buy: $10k / $100 = 100 shares
+    # Cost approx: 100 shares * $100 * 1% = $100
+    # Net value: $9900
+    # Actual buy: $9900 / $100 = 99 shares
+
+    N_new, cash_new, realized_cost = state_transition(
+        N_prev, cash_prev, prices, weights, mask, costs_bps
+    )
+
+    assert jnp.allclose(N_new, 99.0, atol=0.1)
+    assert realized_cost > 0.0
+
+
+def test_backtest_jit(sample_data):
+    # Ensure it runs under JIT
+    jit_backtest = jax.jit(backtest)
+
+    pv, tc, holdings, cash = jit_backtest(
+        sample_data["N_0"],
+        sample_data["cash_0"],
+        sample_data["open"],
+        sample_data["close"],
+        sample_data["weights"],
+        sample_data["mask"],
+        sample_data["costs_bps"],
+    )
+
+    assert pv.shape == (sample_data["T"],)
+    assert tc.shape == (sample_data["T"],)
+    assert holdings.shape == (sample_data["T"], sample_data["N"])
+    assert cash.shape == (sample_data["T"],)
+
+
+def test_backtest_logic(sample_data):
+    # Simple case: Buy and Hold 50/50
+    # Prices increase by 1% every day (open 100, close 101)
+    # Rebalance only on day 0
+
+    T, N = sample_data["T"], sample_data["N"]
+    mask = jnp.zeros(T)
+    mask = mask.at[0].set(1.0)
+
+    pv, tc, holdings, cash = backtest(
+        sample_data["N_0"],
+        sample_data["cash_0"],
+        sample_data["open"],
+        sample_data["close"],
+        sample_data["weights"],
+        mask,
+        sample_data["costs_bps"],
+    )
+
+    # Day 0: Buy 500 shares of each (Total $100k, $50k each asset, price $100)
+    # Holdings should be constant after day 0
+    expected_holdings = 500.0
+    assert jnp.allclose(holdings[0], expected_holdings)
+    assert jnp.allclose(holdings[-1], expected_holdings)
+
+    # Day 0 Close Value: 1000 shares * $101 = $101,000
+    assert jnp.allclose(pv[0], 101_000.0)
+
+    # Cash should be 0 (fully invested)
+    assert jnp.allclose(cash[-1], 0.0, atol=1e-5)
+
+
+def test_backtest_costs(sample_data):
+    # High turnover strategy with costs
+    T, N = sample_data["T"], sample_data["N"]
+
+    # Flip weights every day: [1, 0] -> [0, 1]
+    weights = jnp.zeros((T, N))
+    weights = weights.at[::2, 0].set(1.0)
+    weights = weights.at[1::2, 1].set(1.0)
+
+    # High costs: 100 bps (1%)
+    costs_bps = jnp.ones(T) * 100.0
+
+    pv, tc, holdings, cash = backtest(
+        sample_data["N_0"],
+        sample_data["cash_0"],
+        sample_data["open"],
+        sample_data["close"],
+        weights,
+        sample_data["mask"],  # Rebalance every day
+        costs_bps,
+    )
+
+    # Costs should be positive every day
+    assert jnp.all(tc > 0.0)
+
+    # Portfolio value should decrease due to costs (prices are constant-ish)
+    # Open 100, Close 101. Gain 1%. Cost 1% on turnover.
+    # Turnover is 100% every day (sell all A, buy all B).
+    # So roughly flat or slight loss depending on exact math.
+
+    # Just check that costs are accumulating
+    assert jnp.sum(tc) > 1000.0
+
+
+def test_backtest_cash_handling():
+    # Target weights sum to 0.5 -> 50% cash
     T, N = 5, 2
-    init_value = 100.0
-    init_weights = jnp.array([0.5, 0.5])
-    # Zero returns
-    log_returns = jnp.zeros((T, N))
-    # Target weights same as init
-    target_weights = jnp.tile(init_weights, (T, 1))
+    N_0 = jnp.zeros(N)
+    cash_0 = jnp.array(100_000.0)
+    open_prices = jnp.ones((T, N)) * 100.0
+    close_prices = jnp.ones((T, N)) * 100.0
+    weights = jnp.ones((T, N)) * 0.25  # Sum = 0.5
+    mask = jnp.ones(T)
+    costs_bps = jnp.zeros(T)
 
-    final_state, metrics = backtest(
-        init_value, init_weights, log_returns, target_weights
+    pv, tc, holdings, cash = backtest(
+        N_0, cash_0, open_prices, close_prices, weights, mask, costs_bps
     )
 
-    final_value, final_weights = final_state
-    returns, transaction_costs, turnover = metrics
-
-    assert jnp.allclose(final_value, init_value)
-    assert jnp.allclose(returns, 0.0)
-    assert jnp.allclose(transaction_costs, 0.0)
-
-
-def test_simple_growth():
-    # Asset 0 doubles in price, Asset 1 stays same
-    # We hold 100% Asset 0 initially.
-    # Target weights are also 100% Asset 0, so no rebalancing needed.
-    T, N = 1, 2  # One period
-    init_value = 100.0
-    init_weights = jnp.array([1.0, 0.0])
-    # Asset 0 returns 100% (doubles), Asset 1 returns 0%
-    asset_simple_returns = jnp.array([[1.0, 0.0]])
-    log_returns = jnp.log1p(asset_simple_returns)
-    target_weights = jnp.array([[1.0, 0.0]])
-
-    final_state, metrics = backtest(
-        init_value, init_weights, log_returns, target_weights
-    )
-
-    final_value, final_weights = final_state
-    returns, transaction_costs, turnover = metrics
-
-    # Value should double: 100 -> 200
-    assert jnp.allclose(final_value, 200.0)
-    # Returns are now log returns. 100% simple return -> ln(2) log return
-    assert jnp.allclose(returns[0], jnp.log(2.0))
-
-
-def test_transaction_costs():
-    # Switch from [1, 0] to [0, 1]
-    # Zero returns
-    # Drifted weights = initial weights = [1, 0]
-    # Target weights = [0, 1]
-    # Turnover = |0-1| + |1-0| = 2
-    # Cost = V_grown * 2 * 10bps/10000
-    # V_grown = 100 (no return)
-    # Cost = 100 * 2 * 0.001 = 0.2
-    T, N = 1, 2
-    init_value = 100.0
-    init_weights = jnp.array([1.0, 0.0])
-    log_returns = jnp.zeros((T, N))
-    target_weights = jnp.array([[0.0, 1.0]])
-    cost_bp = 10.0
-
-    final_state, metrics = backtest(
-        init_value,
-        init_weights,
-        log_returns,
-        target_weights,
-        transaction_cost_bp=cost_bp,
-    )
-
-    final_value, final_weights = final_state
-    returns, transaction_costs, turnover = metrics
-
-    expected_cost = 100.0 * 2.0 * (10.0 / 10000.0)
-    assert jnp.allclose(transaction_costs[0], expected_cost)
-    assert jnp.allclose(final_value, 100.0 - expected_cost)
-
-
-def test_differentiability():
-    T, N = 5, 3
-    init_value = 1000.0
-    init_weights = jnp.ones(N) / N
-    # Create dummy returns
-    asset_simple_returns = jnp.linspace(0.01, 0.05, T * N).reshape(T, N)
-    log_returns = jnp.log1p(asset_simple_returns)
-
-    # We want to optimize target_weights to maximize final value
-    target_weights = jnp.ones((T, N)) / N
-
-    def loss_fn(weights):
-        final_state, _ = backtest(init_value, init_weights, log_returns, weights)
-        final_value, _ = final_state
-        return -final_value
-
-    grad_fn = jax.grad(loss_fn)
-    grads = grad_fn(target_weights)
-
-    assert grads.shape == target_weights.shape
-    assert not jnp.all(jnp.isnan(grads))
-
-
-def test_conditional_rebalancing():
-    # 2 periods.
-    # Period 0: Mask = False (No rebalance).
-    # Period 1: Mask = True (Rebalance).
-    T, N = 2, 2
-    init_value = 100.0
-    init_weights = jnp.array([0.5, 0.5])
-
-    # Asset 0 returns 100% in period 0, 0% in period 1.
-    # Asset 1 returns 0% in period 0, 0% in period 1.
-    asset_simple_returns = jnp.array([[1.0, 0.0], [0.0, 0.0]])
-    log_returns = jnp.log1p(asset_simple_returns)
-
-    # Target weights are always [0.5, 0.5]
-    target_weights = jnp.array([[0.5, 0.5], [0.5, 0.5]])
-
-    # Mask: [False, True]
-    rebalance_mask = jnp.array([False, True])
-
-    # Expected behavior:
-    # Period 0:
-    #   Start weights: [0.5, 0.5]
-    #   Returns: [1.0, 0.0]
-    #   Grown Value: 100 * (0.5*2 + 0.5*1) = 150
-    #   Drifted Weights:
-    #       w0 = 0.5 * 2 / 1.5 = 1/1.5 = 2/3
-    #       w1 = 0.5 * 1 / 1.5 = 1/3
-    #   Mask is False -> No rebalance.
-    #   End weights = [2/3, 1/3]
-    #   Turnover = 0
-    #   Cost = 0
-
-    # Period 1:
-    #   Start weights: [2/3, 1/3]
-    #   Returns: [0.0, 0.0]
-    #   Grown Value: 150 * 1 = 150
-    #   Drifted Weights: [2/3, 1/3]
-    #   Mask is True -> Rebalance to [0.5, 0.5]
-    #   Turnover = |0.5 - 2/3| + |0.5 - 1/3| = |-1/6| + |1/6| = 1/3
-    #   Cost = 150 * (1/3) * bps
-
-    cost_bp = 10.0
-
-    final_state, metrics = backtest(
-        init_value,
-        init_weights,
-        log_returns,
-        target_weights,
-        transaction_cost_bp=cost_bp,
-        rebalance_mask=rebalance_mask,
-    )
-
-    final_value, final_weights = final_state
-    returns, transaction_costs, turnover = metrics
-
-    # Check Period 0
-    assert jnp.allclose(turnover[0], 0.0)
-    assert jnp.allclose(transaction_costs[0], 0.0)
-
-    # Check Period 1
-    expected_turnover = 1.0 / 3.0
-    expected_cost = 150.0 * expected_turnover * (10.0 / 10000.0)
-    assert jnp.allclose(turnover[1], expected_turnover)
-    assert jnp.allclose(transaction_costs[1], expected_cost)
-
-
-def test_buy_and_hold_equivalence():
-    # If mask is all False, it should be equivalent to buy and hold.
-    T, N = 5, 2
-    init_value = 100.0
-    init_weights = jnp.array([0.5, 0.5])
-
-    # Random returns
-    key = jax.random.PRNGKey(0)
-    asset_simple_returns = jax.random.uniform(key, (T, N), minval=-0.1, maxval=0.1)
-    log_returns = jnp.log1p(asset_simple_returns)
-
-    # Target weights (irrelevant because mask is False, but needed for shape)
-    target_weights = jnp.ones((T, N)) / N
-
-    # Mask: All False
-    rebalance_mask = jnp.zeros(T, dtype=bool)
-
-    final_state, metrics = backtest(
-        init_value,
-        init_weights,
-        log_returns,
-        target_weights,
-        rebalance_mask=rebalance_mask,
-    )
-
-    final_value, final_weights = final_state
-    returns, transaction_costs, turnover = metrics
-
-    # Verify no trading
-    assert jnp.allclose(turnover, 0.0)
-    assert jnp.allclose(transaction_costs, 0.0)
-
-    # Calculate Buy and Hold Value manually
-    # Value = InitValue * sum(InitWeight_i * Product(1 + r_i,t))
-    # Cumulative return for each asset
-    cum_asset_growth = jnp.prod(1.0 + asset_simple_returns, axis=0)
-    expected_final_value = init_value * jnp.sum(init_weights * cum_asset_growth)
-
-    assert jnp.allclose(final_value, expected_final_value)
-
-
-def test_vmap_backtest():
-    # Test running multiple backtests in parallel using vmap
-    from silkroad.functional.backtest import _backtest_jit
-
-    B = 10  # Batch size
-    T, N = 5, 3
-    init_value = 1000.0
-    init_weights = jnp.ones(N) / N
-
-    # Create a batch of returns: shape (B, T, N)
-    key = jax.random.PRNGKey(42)
-    asset_simple_returns = jax.random.uniform(key, (B, T, N), minval=-0.05, maxval=0.05)
-    log_returns = jnp.log1p(asset_simple_returns)
-
-    # Target weights: shape (B, T, N)
-    target_weights = jnp.ones((B, T, N)) / N
-
-    # Mask: shape (B, T)
-    mask = jnp.ones((B, T), dtype=bool)
-
-    # Transaction cost: scalar (broadcasted) or we can map over it too.
-    # Here we treat it as static for vmap, or we can pass it.
-    # _backtest_jit signature: (init_value, init_weights, log_returns, target_weights, mask, transaction_cost_bp)
-    # We want to map over log_returns (2), target_weights (3), mask (4).
-    # init_value, init_weights, transaction_cost_bp are shared.
-
-    vmap_backtest = jax.vmap(_backtest_jit, in_axes=(None, None, 0, 0, 0, None))
-
-    final_states, metrics = vmap_backtest(
-        init_value, init_weights, log_returns, target_weights, mask, 10.0  # bps
-    )
-
-    final_values, final_weights = final_states
-    returns, costs, turnover = metrics
-
-    assert final_values.shape == (B,)
-    assert final_weights.shape == (B, N)
-    assert returns.shape == (B, T)
-    assert costs.shape == (B, T)
-    assert turnover.shape == (B, T)
-
-    # Verify that the first element matches a single run
-    single_state, single_metrics = _backtest_jit(
-        init_value, init_weights, log_returns[0], target_weights[0], mask[0], 10.0
-    )
-
-    assert jnp.allclose(final_values[0], single_state[0])
-    assert jnp.allclose(returns[0], single_metrics[0])
+    # Should have ~50k cash
+    assert jnp.allclose(cash, 50_000.0, atol=1e-3)
+    # Portfolio value should be stable at 100k
+    assert jnp.allclose(pv, 100_000.0, atol=1e-3)
