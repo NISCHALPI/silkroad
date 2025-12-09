@@ -3,6 +3,7 @@ import typing as tp
 import datetime as dt
 import riskfolio as rp
 from enum import Enum
+from silkroad.core.enums import Horizon
 
 __all__ = ["CovEstimationQuery", "MeanEstimationQuery"]
 
@@ -46,12 +47,13 @@ class MeanEstimationQuery(BaseModel):
     end: tp.Optional[dt.datetime] = Field(
         None, description="End date of the data in UTC"
     )
+    horizon: Horizon = Field(Horizon.DAILY, description="Horizon/Frequency of the data")
 
 
 class CovEstimationQuery(BaseModel):
     tickers: tp.List[str] = Field(
         ..., min_items=2, description="List of tickers with at least two tickers"
-    )
+    )  # type: ignore
     method: CovMethod = Field(
         CovMethod.HIST,
         description="Covariance estimation method for collection of assets",
@@ -62,3 +64,4 @@ class CovEstimationQuery(BaseModel):
     end: tp.Optional[dt.datetime] = Field(
         None, description="End date of the data in UTC"
     )
+    horizon: Horizon = Field(Horizon.DAILY, description="Horizon/Frequency of the data")

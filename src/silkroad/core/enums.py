@@ -5,6 +5,7 @@ import pandas as pd
 import datetime as dt
 import typing as tp
 import pandas_market_calendars as mcal
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 
 class Horizon(Enum):
@@ -74,6 +75,27 @@ class Horizon(Enum):
         }
         return mapping[self]
 
+    def to_alpaca_timeframe_unit(self) -> TimeFrame:
+        """Convert the horizon to an Alpaca TimeFrame unit.
+
+        Args:
+            None
+
+        Returns:
+            TimeFrame: Corresponding Alpaca TimeFrame unit.
+        """
+        if self == Horizon.SECONDS:
+            raise ValueError("Seconds horizon is not supported by Alpaca TimeFrame.")
+
+        mapping = {
+            Horizon.MINUTE: TimeFrame.Minute,
+            Horizon.HOURLY: TimeFrame.Hour,
+            Horizon.DAILY: TimeFrame.Day,
+            Horizon.WEEKLY: TimeFrame.Week,
+            Horizon.MONTHLY: TimeFrame.Month,
+        }
+        return mapping[self]
+
     def check_valid(self, delta: pd.Timedelta) -> bool:
         """Check if a given pandas Timedelta matches the horizon within tolerance.
 
@@ -86,13 +108,6 @@ class Horizon(Enum):
         expected = self.to_pandas_timedelta()
         tolerance = pd.Timedelta(milliseconds=1)
         return abs(delta - expected) <= tolerance
-
-
-class DataBackend(Enum):
-    """Data backend providers."""
-
-    YFINANCE = "yfinance"
-    ALPACA = "alpaca"
 
 
 class AssetClass(Enum):

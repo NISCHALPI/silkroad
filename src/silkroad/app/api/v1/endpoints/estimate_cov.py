@@ -2,13 +2,12 @@
 
 import typing as tp
 from fastapi import APIRouter, Depends, HTTPException
-from silkroad.app.db.market_data import MarketDataDB
 from silkroad.app.core.dependencies import get_db
-from silkroad.app.schemas.db_query import TickerCollectionDataQuery
 from silkroad.app.schemas.rfolio_estimation_query import (
     CovEstimationQuery,
     MeanEstimationQuery,
 )
+from silkroad.db import ArcticDatabase
 import pandas as pd
 import riskfolio as rp
 import datetime as dt
@@ -50,8 +49,8 @@ def to_symmetric_positive_definite_matrix(
 
 @router.post("/estimate_cov")
 def estimate_cov(
-    query: CovEstimationQuery, db: MarketDataDB = Depends(get_db)
-) -> tp.Dict[str, tp.Dict[str, tp.Any]]:
+    query: CovEstimationQuery, db: ArcticDatabase = Depends(get_db)
+) -> tp.Dict[str, tp.Dict[str, float]]:
     """Estimate covariance matrix for a given collection of tickers
 
     Args:
@@ -59,15 +58,15 @@ def estimate_cov(
         db (MarketDataDB, optional): Database connection. Defaults to Depends(get_db).
 
     Returns:
-        tp.Dict[str, tp.Dict[str, tp.Any]]: Covariance matrix
+        tp.Dict[str, tp.Dict[str, float]]: Covariance matrix
     """
     # Check availability of tickers
-    available_tickers = db.get_available_tickers()
+    available_tickers = db.list_symbols(horizon=query.horizon)
     if not set(query.tickers).issubset(set(available_tickers)):
         raise HTTPException(status_code=400, detail="Some tickers are not available")
 
     # Get the data range for the tickers
-    summary = db.summary()
+    summary = db.summary(horizon=query.horizon)
     ticker_summary = summary.loc[query.tickers]
     sd = ticker_summary["start_date"].max().to_pydatetime()
     ed = ticker_summary["end_date"].min().to_pydatetime()
@@ -86,8 +85,11 @@ def estimate_cov(
         query.end = query.end.replace(tzinfo=dt.timezone.utc)
 
     try:
-        data = db.get_uniform_bar_collection(
-            ticker=query.tickers, start=query.start, end=query.end
+        data = db.read_into_uniform_barcollection(
+            symbols=query.tickers,
+            horizon=query.horizon,
+            start=query.start,
+            end=query.end,
         )
 
         # Calculate the arithmetic returns
@@ -96,19 +98,19 @@ def estimate_cov(
         # Calculate the covariance matrix using riskfolio
         cov = rp.covar_matrix(returns, method=query.method.value)
         # Coerce the covariance matrix to be symmetric and positive definite
-        cov = to_symmetric_positive_definite_matrix(cov)
+        cov = to_symmetric_positive_definite_matrix(cov.values)
         # Convert to dataframe
         cov = pd.DataFrame(cov, index=query.tickers, columns=query.tickers)  # type: ignore
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    return cov.replace({np.nan: None}).to_dict(orient="index")
+    return cov.to_dict(orient="index")  # type: ignore
 
 
 @router.post("/estimate_mean")
 def estimate_mean(
-    query: MeanEstimationQuery, db: MarketDataDB = Depends(get_db)
+    query: MeanEstimationQuery, db: ArcticDatabase = Depends(get_db)
 ) -> tp.Dict[str, float]:
     """Estimate mean for a given collection of tickers
 
@@ -120,12 +122,12 @@ def estimate_mean(
         tp.Dict[str, float]: Mean for each ticker
     """
     # Check availability of tickers
-    available_tickers = db.get_available_tickers()
+    available_tickers = db.list_symbols(horizon=query.horizon)
     if not set(query.tickers).issubset(set(available_tickers)):
         raise HTTPException(status_code=400, detail="Some tickers are not available")
 
     # Get the data range for the tickers
-    summary = db.summary()
+    summary = db.summary(horizon=query.horizon)
     ticker_summary = summary.loc[query.tickers]
     sd = ticker_summary["start_date"].max().to_pydatetime()
     ed = ticker_summary["end_date"].min().to_pydatetime()
@@ -144,8 +146,11 @@ def estimate_mean(
         query.end = query.end.replace(tzinfo=dt.timezone.utc)
 
     try:
-        data = db.get_uniform_bar_collection(
-            ticker=query.tickers, start=query.start, end=query.end
+        data = db.read_into_uniform_barcollection(
+            symbols=query.tickers,
+            horizon=query.horizon,
+            start=query.start,
+            end=query.end,
         )
 
         # Calculate the arithmetic returns
