@@ -286,7 +286,7 @@ class UniformBarSet(BaseModel):
         return UniformBarSet(
             symbol=symbol,
             horizon=horizon,
-            initial_bars=bars,
+            initial_bars=bars,  # type: ignore
             buffer_limit=buffer_limit,
             max_bars=max_bars,
         )
@@ -349,7 +349,7 @@ class UniformBarSet(BaseModel):
             return UniformBarSet(
                 symbol=self.symbol,
                 horizon=self.horizon,
-                initial_bars=sliced_bars,
+                initial_bars=sliced_bars,  # type: ignore
                 buffer_limit=self.buffer_limit,
                 max_bars=self.max_bars,
             )
@@ -493,7 +493,7 @@ class UniformBarSet(BaseModel):
         return UniformBarSet(
             symbol=self.symbol,
             horizon=new_horizon,
-            initial_bars=bars,
+            initial_bars=bars,  # type: ignore
             buffer_limit=self.buffer_limit,
             max_bars=self.max_bars,
         )
@@ -630,7 +630,7 @@ class UniformBarSet(BaseModel):
         return UniformBarSet(
             symbol=self.symbol,
             horizon=self.horizon,
-            initial_bars=bars,
+            initial_bars=bars,  # type: ignore
             buffer_limit=self.buffer_limit,
             max_bars=self.max_bars,
         )
@@ -696,7 +696,7 @@ class UniformBarSet(BaseModel):
         return UniformBarSet(
             symbol=reference.symbol,
             horizon=reference.horizon,
-            initial_bars=bars,
+            initial_bars=bars,  # type: ignore
             buffer_limit=reference.buffer_limit,
             max_bars=reference.max_bars,
         )
@@ -869,7 +869,7 @@ class UniformBarSet(BaseModel):
                 UniformBarSet(
                     symbol=self.symbol,
                     horizon=self.horizon,
-                    initial_bars=bars,
+                    initial_bars=bars,  # type: ignore
                     buffer_limit=self.buffer_limit,
                     max_bars=self.max_bars,
                 )
@@ -1163,7 +1163,7 @@ class UniformBarCollection(BaseModel):
                 symbol: UniformBarSet(
                     symbol=bar_set.symbol,
                     horizon=bar_set.horizon,
-                    initial_bars=bar_set.bars[index],
+                    initial_bars=bar_set.bars[index],  # type: ignore
                     buffer_limit=bar_set.buffer_limit,
                     max_bars=bar_set.max_bars,
                 )
