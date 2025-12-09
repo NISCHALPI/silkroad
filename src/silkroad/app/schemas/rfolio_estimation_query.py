@@ -52,7 +52,7 @@ class MeanEstimationQuery(BaseModel):
 
 class CovEstimationQuery(BaseModel):
     tickers: tp.List[str] = Field(
-        ..., min_items=2, description="List of tickers with at least two tickers"
+        ..., min_length=2, description="List of tickers with at least two tickers"
     )  # type: ignore
     method: CovMethod = Field(
         CovMethod.HIST,

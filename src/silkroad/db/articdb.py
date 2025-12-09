@@ -184,7 +184,7 @@ class ArcticDatabase:
                     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
 
                 # If aware, convert to UTC then make naive
-                if pd.api.types.is_datetime64tz_dtype(df["timestamp"]):  # type: ignore
+                if isinstance(df["timestamp"].dtype, pd.DatetimeTZDtype):  # type: ignore
                     df["timestamp"] = (
                         df["timestamp"].dt.tz_convert("UTC").dt.tz_localize(None)  # type: ignore
                     )

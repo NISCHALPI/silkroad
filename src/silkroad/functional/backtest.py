@@ -15,22 +15,22 @@ Mathematical Framework:
     At each rebalancing step $t$:
 
     1. Gross portfolio value:
-       $$V_t^{gross} = \sum_{i=1}^{N} N_{t-1,i} \cdot P_{t,i}^{open} + C_{t-1}$$
+       $$V_t^{gross} = \\sum_{i=1}^{N} N_{t-1,i} \\cdot P_{t,i}^{open} + C_{t-1}$$
 
     2. Theoretical target shares (before costs):
-       $$N_t^{theo} = \frac{V_t^{gross} \cdot w_t}{P_t^{open}}$$
+       $$N_t^{theo} = \frac{V_t^{gross} \\cdot w_t}{P_t^{open}}$$
 
     3. Transaction costs:
-       $$TC_t = \sum_{i=1}^{N} |N_t^{theo} - N_{t-1,i}| \cdot P_{t,i}^{open} \cdot \frac{T_{bps}}{10000}$$
+       $$TC_t = \\sum_{i=1}^{N} |N_t^{theo} - N_{t-1,i}| \\cdot P_{t,i}^{open} \\cdot \frac{T_{bps}}{10000}$$
 
     4. Net portfolio value (after costs):
        $$V_t^{net} = V_t^{gross} - TC_t$$
 
     5. Actual target shares:
-       $$N_t = \frac{V_t^{net} \cdot w_t}{P_t^{open}}$$
+       $$N_t = \\frac{V_t^{net} \\cdot w_t}{P_t^{open}}$$
 
     6. Cash holdings:
-       $$C_t = V_t^{net} - \sum_{i=1}^{N} N_{t,i} \cdot P_{t,i}^{open}$$
+       $$C_t = V_t^{net} - \\sum_{i=1}^{N} N_{t,i} \\cdot P_{t,i}^{open}$$
 
 Example:
     >>> import jax.numpy as jnp
@@ -282,8 +282,8 @@ def backtest(
         close: Close prices over the backtest period. Shape: (T, N).
             Used for marking-to-market at end of each period.
         target_weights: Target portfolio weights over time. Shape: (T, N).
-            Each row should satisfy $0 \leq w_{t,i} \leq 1$.
-            If $\sum_i w_{t,i} < 1$, remainder is allocated to cash.
+            Each row should satisfy $0 \\leq w_{t,i} \\leq 1$.
+            If $\\sum_i w_{t,i} < 1$, remainder is allocated to cash.
         rebalancing_mask: Binary indicator for rebalancing days. Shape: (T,).
             Values: 0 (hold) or 1 (rebalance). Example: rebalance every Friday.
         transaction_costs_bps: Transaction costs in basis points over time.

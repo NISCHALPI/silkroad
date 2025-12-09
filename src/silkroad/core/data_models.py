@@ -1003,6 +1003,17 @@ class UniformBarCollection(BaseModel):
         return close_df
 
     @property
+    def open(self) -> pd.DataFrame:
+        """Get a DataFrame of opening prices for all assets.
+
+        Returns:
+            DataFrame with MultiIndex (symbol, timestamp) and 'open' column.
+        """
+        df = self.df.reset_index()
+        open_df = df.pivot(index="timestamp", columns="symbol", values="open")
+        return open_df
+
+    @property
     def log_returns(self) -> pd.DataFrame:
         """Get a DataFrame of log returns for all assets.
 

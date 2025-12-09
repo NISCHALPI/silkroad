@@ -5,20 +5,19 @@ from unittest.mock import MagicMock, patch
 from silkroad.db.backends import AlpacaBackendProvider
 from silkroad.core.data_models import Asset
 from silkroad.core.enums import Horizon, AssetClass, Exchange, Sector
-from alpaca.data.enums import Adjustment
 
 
 # Fixtures
 @pytest.fixture
 def sample_assets():
     return [
-        Asset(
+        Asset(  # type: ignore
             ticker="AAPL",
             asset_class=AssetClass.STOCK,
             exchange=Exchange.NASDAQ,
             sector=Sector.TECHNOLOGY,
         ),
-        Asset(
+        Asset(  # type: ignore
             ticker="BTC/USD",
             asset_class=AssetClass.CRYPTO,
             exchange=Exchange.OTHER,
@@ -118,8 +117,8 @@ class TestAlpacaBackendProvider:
         mock_crypto_client.get_crypto_bars.assert_called_once()
 
     @patch("silkroad.db.backends.StockHistoricalDataClient")
-    @patch("silkroad.Sector.OTHERS.backends.CryptoHistoricalDataClient")
-    @patch("silkroad.Sector.OTHERS.backends.logger")
+    @patch("silkroad.db.backends.CryptoHistoricalDataClient")
+    @patch("silkroad.db.backends.logger")
     def test_date_mismatch_warning(
         self,
         mock_logger,
@@ -163,8 +162,8 @@ class TestAlpacaBackendProvider:
 
         assert mock_logger.warning.call_count == 2
 
-    @patch("silkroad.Sector.OTHERS.backends.StockHistoricalDataClient")
-    @patch("silkroad.Sector.OTHERS.backends.CryptoHistoricalDataClient")
+    @patch("silkroad.db.backends.StockHistoricalDataClient")
+    @patch("silkroad.db.backends.CryptoHistoricalDataClient")
     def test_fetch_data_partial_failure(
         self, MockCryptoClient, MockStockClient, sample_assets, sample_dates
     ):
@@ -212,7 +211,7 @@ class TestAlpacaBackendProvider:
         mock_stock_client.get_stock_bars.assert_called_once()
         mock_crypto_client.get_crypto_bars.assert_called_once()
 
-    @patch("silkroad.Sector.OTHERS.backends.StockHistoricalDataClient")
+    @patch("silkroad.db.backends.StockHistoricalDataClient")
     @patch("silkroad.db.backends.CryptoHistoricalDataClient")
     def test_fetch_data_empty(
         self, MockCryptoClient, MockStockClient, sample_assets, sample_dates
