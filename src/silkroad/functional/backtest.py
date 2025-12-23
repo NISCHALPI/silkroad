@@ -1,159 +1,277 @@
 """Vectorized backtesting engine with transaction costs using JAX.
 
-This module provides a high-performance backtesting framework for portfolio strategies
-using JAX's functional programming paradigm. The implementation uses `jax.lax.scan` for
-efficient sequential state transitions, making it suitable for long time series and
-hyperparameter optimization with `jax.vmap`.
+This module provides a high-performance, vectorized backtesting framework for
+portfolio strategies using JAX's functional programming paradigm. The implementation
+leverages ``jax.lax.scan`` for efficient sequential state transitions, making it
+particularly well-suited for processing long time series data and enabling
+hyperparameter optimization through ``jax.vmap`` for parallel execution across
+multiple parameter configurations.
 
-The backtest assumes:
-    - Rebalancing occurs at the open price to avoid lookahead bias
-    - Transaction costs are proportional to turnover (basis points)
-    - Cash holdings are tracked explicitly
-    - Portfolio value is computed at close prices
+The backtesting engine simulates the evolution of a portfolio over discrete time
+steps. At each time step, the engine evaluates whether a rebalancing event should
+occur based on a user-provided binary mask. When rebalancing is triggered, the
+portfolio is adjusted to match target weights while accounting for proportional
+transaction costs. Portfolio valuation is performed using close prices to provide
+accurate end-of-day portfolio values.
+
+Assumptions:
+    The backtesting framework operates under the following assumptions:
+
+    1. **Rebalancing Timing**: All rebalancing trades are executed at the open
+       price of each trading day. This approach eliminates lookahead bias by
+       ensuring that trading decisions are made using information available at
+       the time of execution.
+
+    2. **Transaction Costs**: Transaction costs are modeled as proportional to
+       the absolute dollar value of turnover, expressed in basis points (bps).
+       One basis point equals 0.01% or 1/10000 of the traded value.
+
+    3. **Portfolio Composition**: The portfolio consists of N assets. If a cash
+       position is required, it must be explicitly included as one of the N
+       assets with appropriate pricing (typically unit price of 1.0).
+
+    4. **Portfolio Valuation**: Portfolio values are marked-to-market using
+       close prices at the end of each trading day.
+
+    5. **Weight Normalization**: Target portfolio weights must sum to exactly
+       1.0 at every time step. This constraint ensures that the entire portfolio
+       value is allocated across the available assets.
+
+    6. **Price Handling**: Zero prices are treated as missing data or delisted
+       securities. The engine applies safe division to prevent numerical issues
+       when encountering zero prices.
 
 Mathematical Framework:
-    At each rebalancing step $t$:
+    The backtesting engine implements the following mathematical operations at
+    each rebalancing step t:
 
-    1. Gross portfolio value:
-       $$V_t^{gross} = \\sum_{i=1}^{N} N_{t-1,i} \\cdot P_{t,i}^{open} + C_{t-1}$$
+    1. **Gross Portfolio Value Calculation**:
+       The gross portfolio value is computed as the sum of each asset's holdings
+       multiplied by its current open price:
 
-    2. Theoretical target shares (before costs):
-       $$N_t^{theo} = \frac{V_t^{gross} \\cdot w_t}{P_t^{open}}$$
+       .. math::
+           V_t^{gross} = \\sum_{i=1}^{N} N_{t-1,i} \\cdot P_{t,i}^{open}
 
-    3. Transaction costs:
-       $$TC_t = \\sum_{i=1}^{N} |N_t^{theo} - N_{t-1,i}| \\cdot P_{t,i}^{open} \\cdot \frac{T_{bps}}{10000}$$
+    2. **Theoretical Target Shares Estimation**:
+       Before accounting for transaction costs, the theoretical number of shares
+       required to achieve target weights is calculated:
 
-    4. Net portfolio value (after costs):
-       $$V_t^{net} = V_t^{gross} - TC_t$$
+       .. math::
+           N_t^{theo} = \\frac{V_t^{gross} \\cdot w_t}{P_t^{open}}
 
-    5. Actual target shares:
-       $$N_t = \\frac{V_t^{net} \\cdot w_t}{P_t^{open}}$$
+    3. **Transaction Cost Computation**:
+       Transaction costs are computed based on the absolute change in share
+       holdings from the theoretical rebalance:
 
-    6. Cash holdings:
-       $$C_t = V_t^{net} - \\sum_{i=1}^{N} N_{t,i} \\cdot P_{t,i}^{open}$$
+       .. math::
+           TC_t = \\sum_{i=1}^{N} |N_t^{theo} - N_{t-1,i}| \\cdot P_{t,i}^{open} \\cdot \\frac{T_{bps}}{10000}
+
+    4. **Net Portfolio Value Determination**:
+       The net portfolio value available for investment is the gross value minus
+       transaction costs:
+
+       .. math::
+           V_t^{net} = V_t^{gross} - TC_t
+
+    5. **Actual Target Shares Calculation**:
+       The final share holdings are computed using the net portfolio value:
+
+       .. math::
+           N_t = \\frac{V_t^{net} \\cdot w_t}{P_t^{open}}
+
+Attributes:
+    backtest: The main backtesting function that executes the vectorized
+        portfolio simulation. This is the primary public interface exposed
+        by this module.
 
 Example:
+    The following example demonstrates how to run a simple backtest with a
+    three-asset portfolio consisting of cash and two risky assets:
+
     >>> import jax.numpy as jnp
     >>> from silkroad.functional.backtest import backtest
     >>>
-    >>> # Initialize with $100,000 cash, no shares
-    >>> N_0 = jnp.zeros(3)
-    >>> cash_0 = jnp.array(100_000.0)
+    >>> # Initialize with 1000 shares of asset 0 (e.g., Cash with Price=1)
+    >>> N_0 = jnp.array([1000.0, 0.0, 0.0])
     >>>
-    >>> # 252 trading days, 3 assets
+    >>> # Create price data for 252 trading days and 3 assets
     >>> open_prices = jnp.ones((252, 3)) * 100.0
-    >>> close_prices = jnp.ones((252, 3)) * 101.0
+    >>> open_prices = open_prices.at[:, 0].set(1.0)  # Asset 0 is Cash
+    >>> close_prices = open_prices  # Simplified: close equals open
     >>>
-    >>> # Equal weight portfolio, rebalance weekly
+    >>> # Define equal weight portfolio allocation (33% each asset)
     >>> weights = jnp.ones((252, 3)) / 3
-    >>> rebal_mask = jnp.zeros(252)
-    >>> rebal_mask = rebal_mask.at[::5].set(1.0)  # Every 5 days
     >>>
-    >>> # 10 bps transaction costs
-    >>> costs_bps = jnp.ones(252) * 10.0
+    >>> # Rebalance every 5 trading days
+    >>> rebal_mask = jnp.zeros(252).at[::5].set(1.0)
     >>>
-    >>> pv, tc, holdings, cash = backtest(
-    ...     N_0, cash_0, open_prices, close_prices,
+    >>> # Apply 10 basis points transaction cost
+    >>> costs_bps = jnp.zeros((252, 3))
+    >>> costs_bps = costs_bps.at[:, 0].set(0.0) # Cash has no transaction cost
+    >>> costs_bps = costs_bps.at[:, 1].set(10.0) # Stock 1 has 10 bps transaction cost
+    >>> costs_bps = costs_bps.at[:, 2].set(10.0) # Stock 2 has 10 bps transaction cost
+    >>>
+    >>> # Execute the backtest
+    >>> pv, tc, holdings = backtest(
+    ...     N_0, open_prices, close_prices,
     ...     weights, rebal_mask, costs_bps
     ... )
-    >>> print(f"Final portfolio value: ${pv[-1]:,.2f}")
 
-Notes:
-    - All functions are JIT-compiled for performance
-    - The module is stateless and thread-safe
-    - Missing price data (zeros) are handled gracefully
-    - Negative equity is clipped to zero to prevent invalid states
+See Also:
+    - :class:`BacktestConfig`: Pydantic model for validating backtest inputs.
+    - :func:`state_transition`: Core rebalancing logic for a single step.
+    - ``jax.lax.scan``: JAX primitive used for efficient sequential iteration.
 """
+
+import typing as tp
 
 import jax
 import jax.numpy as jnp
-import typing as tp
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 __all__ = ["backtest"]
+
+
+class BacktestConfig(BaseModel):
+    """Configuration and validation for backtest parameters.
+
+    This class serves as a validator for the inputs to the backtest function using Pydantic.
+    It ensures that all inputs are JAX arrays of consistent shapes and that logical constraints
+    (like weights summing to 1.0) are met.
+
+    It is recommended to use this class to validate inputs to the backtest function and use the
+    following pattern:
+
+    >>> config = BacktestConfig(
+    ...     N_0=N_0,
+    ...     open=open_prices,
+    ...     close=close_prices,
+    ...     target_weights=weights,
+    ...     rebalancing_mask=rebal_mask,
+    ...     transaction_costs_bps=costs_bps,
+    ... )
+    >>> pv, tc, holdings = backtest(**config.model_dump())
+    """
+
+    N_0: jax.Array = Field(
+        ..., description="Initial share holdings for each asset. Shape: (N,)."
+    )
+    open: jax.Array = Field(
+        ..., description="Open prices over the backtest period. Shape: (T, N)."
+    )
+    close: jax.Array = Field(
+        ..., description="Close prices over the backtest period. Shape: (T, N)."
+    )
+    target_weights: jax.Array = Field(
+        ..., description="Target portfolio weights over time. Shape: (T, N)."
+    )
+    rebalancing_mask: jax.Array = Field(
+        ..., description="Binary indicator for rebalancing days. Shape: (T,)."
+    )
+    transaction_costs_bps: jax.Array = Field(
+        ..., description="Transaction costs in basis points over time. Shape: (T, N)."
+    )
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @model_validator(mode="before")
+    def validate_inputs(cls, data):
+        """Validates input types, shapes, and constraints."""
+        params = [
+            data.get("N_0"),
+            data.get("open"),
+            data.get("close"),
+            data.get("target_weights"),
+            data.get("rebalancing_mask"),
+            data.get("transaction_costs_bps"),
+        ]
+
+        if any(p is None for p in params):
+            # Let Pydantic handle missing fields standard error
+            return data
+
+        if not all(isinstance(param, jax.Array) for param in params):
+            raise TypeError("All inputs must be JAX arrays.")
+
+        # Check shapes
+        two_dim_params = [
+            data["open"],
+            data["close"],
+            data["target_weights"],
+        ]
+        one_dim_params = [data["rebalancing_mask"]]
+
+        if not all(param.ndim == 2 for param in two_dim_params):
+            raise ValueError("Open, close, and target_weights must be 2D arrays.")
+
+        # Check transaction_costs_bps shape
+        if data["transaction_costs_bps"].ndim != 2:
+            raise ValueError(
+                "Transaction_costs_bps must be a 2D array of shape (T, N)."
+            )
+
+        if not all(param.ndim == 1 for param in one_dim_params):
+            raise ValueError("Rebalancing_mask must be a 1D array.")
+
+        # Check consistent time dimension
+        T = data["open"].shape[0]
+        if not all(
+            param.shape[0] == T
+            for param in two_dim_params
+            + one_dim_params
+            + [data["transaction_costs_bps"]]
+        ):
+            raise ValueError(
+                "All time-dependent inputs must have the same number of time steps."
+            )
+
+        # Check weights sum to 1.0
+        # Use a tolerance for floating point comparisons
+        weights = data["target_weights"]
+        sum_weights = jnp.sum(weights, axis=-1)
+        if not jnp.allclose(sum_weights, 1.0, atol=1e-5):
+            raise ValueError("Target weights must sum to 1.0 for every time step.")
+
+        return data
 
 
 @jax.jit
 def state_transition(
     N_prev: jax.Array,
-    cash_prev: jax.Array,
     P_trade: jax.Array,
     W_target: jax.Array,
     mask: jax.Array,
     T_bps: jax.Array,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array]:
     """Execute a single rebalancing step with transaction costs.
 
     This function implements the core portfolio rebalancing logic. It calculates
-    the new asset holdings and cash position after rebalancing to target weights,
-    accounting for proportional transaction costs. The rebalancing is controlled
-    by a mask to support flexible rebalancing schedules.
+    the new asset holdings after rebalancing to target weights, accounting for
+    proportional transaction costs.
 
-    The function handles edge cases including:
-        - Zero or missing prices (assigns weight to safe placeholder)
-        - Portfolio bankruptcy (clips net value to zero)
-        - Cash positions when target weights sum to < 1.0
-        - No-rebalancing days (returns previous state unchanged)
+    The function enforces the constraint that `W_target` should sum to 1.0. If
+    it does not, the behavior is mathematically consistent (allocating that % of
+    value), but this is generally considered a configuration error in this framework.
 
     Args:
-        N_prev: Previous number of shares held for each asset. Shape: (N,)
-            where N is the number of assets. Units: shares.
-        cash_prev: Previous cash holdings. Shape: (). Units: currency.
-        P_trade: Current trade prices for rebalancing. Shape: (N,).
-            Units: currency per share. Zero values indicate missing data.
-        W_target: Target portfolio weights for each asset. Shape: (N,).
-            Must satisfy $0 \leq w_i \leq 1$ and typically $\sum w_i \leq 1$.
-            The remainder $(1 - \sum w_i)$ is allocated to cash.
-        mask: Rebalancing indicator. Shape: (). Values: 0 (hold) or 1 (rebalance).
-            When mask=0, the function returns the previous state unchanged.
-        T_bps: Transaction costs in basis points. Shape: (). Units: bps.
-            Example: 10.0 means 0.1% cost on traded value.
+        N_prev (jax.Array): Previous number of shares held for each asset.
+            Shape: (N,). Units: shares.
+        P_trade (jax.Array): Current trade prices for rebalancing.
+            Shape: (N,). Units: currency per share. Zero values indicate missing data.
+        W_target (jax.Array): Target portfolio weights for each asset.
+            Shape: (N,). Must satisfy $\\sum w_i = 1$.
+        mask (jax.Array): Rebalancing indicator.
+            Shape: (). Values: 0 (hold) or 1 (rebalance).
+        transaction_costs_bps (jax.Array): Transaction costs in basis points for each asset.
+            Shape: (N,). Example: 10.0 means 0.1% cost for that asset.
 
     Returns:
-        A tuple containing:
-            - N_new: New share holdings after rebalancing. Shape: (N,).
-            - cash_new: New cash holdings after rebalancing. Shape: ().
-            - realized_cost: Transaction costs incurred this step. Shape: ().
-              Zero when mask=0.
-
-    Mathematical Details:
-        The two-step cost calculation addresses the circular dependency between
-        costs and final holdings:
-
-        1. Estimate costs using theoretical targets (pre-cost)
-        2. Compute actual targets using net portfolio value (post-cost)
-
-        This approximation is accurate when transaction costs are small relative
-        to portfolio value (typical in practice).
-
-    Example:
-        >>> import jax.numpy as jnp
-        >>> from silkroad.functional.backtest import state_transition
-        >>>
-        >>> # Current holdings: 100 shares of 2 assets, $10k cash
-        >>> N_prev = jnp.array([100.0, 100.0])
-        >>> cash_prev = jnp.array(10_000.0)
-        >>>
-        >>> # Prices: $50 and $100
-        >>> prices = jnp.array([50.0, 100.0])
-        >>>
-        >>> # Target: 60/40 portfolio (4% cash)
-        >>> weights = jnp.array([0.60, 0.40])
-        >>>
-        >>> # Rebalance with 5 bps costs
-        >>> N_new, cash_new, cost = state_transition(
-        ...     N_prev, cash_prev, prices, weights,
-        ...     jnp.array(1.0), jnp.array(5.0)
-        ... )
-        >>> print(f"New holdings: {N_new}")
-        >>> print(f"Cash: ${cash_new:.2f}")
-        >>> print(f"Transaction cost: ${cost:.2f}")
-
-    See Also:
-        backtest: High-level backtesting function using this transition.
+        tuple[jax.Array, jax.Array]:
+            **N_new** (jax.Array): New share holdings after rebalancing. Shape: (N,).
+            **realized_cost** (jax.Array): Transaction costs incurred. Shape: ().
     """
-    # 1. Calculate Total Portfolio Value (Assets + Cash)
-    val_assets = jnp.sum(N_prev * P_trade)
-    val_gross = val_assets + cash_prev
+    # 1. Calculate Total Portfolio Value using current holdings and prices
+    val_gross = jnp.sum(N_prev * P_trade)
 
     # 2. Safe division: handle zero prices (missing data / delisted)
     P_safe = jnp.where(P_trade == 0.0, 1.0, P_trade)
@@ -172,190 +290,209 @@ def state_transition(
     # 6. Calculate Real Target Shares based on Net Value
     N_rebal = (val_net * W_target) / P_safe
 
-    # 7. Cash = Net Equity - Value of new stock positions
-    #    This handles W_target summing to < 1.0
-    cash_rebal = val_net - jnp.sum(N_rebal * P_trade)
-
-    # 8. Apply mask: If mask=0, hold previous state
+    # 7. Apply mask: If mask=0, hold previous state
     N_new = jnp.where(mask == 1, N_rebal, N_prev)
-    cash_new = jnp.where(mask == 1, cash_rebal, cash_prev)
     realized_cost = jnp.where(mask == 1, cost_approx, 0.0)
 
-    return N_new, cash_new, realized_cost
+    return N_new, realized_cost
 
 
 @jax.jit
 def backtest_scan_fn(
-    carry: tuple[jax.Array, jax.Array],
+    carry: jax.Array,
     x: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array],
-) -> tuple[
-    tuple[jax.Array, jax.Array], tuple[jax.Array, jax.Array, jax.Array, jax.Array]
-]:
+) -> tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array]]:
     """Scan function for a single backtest step.
 
-    This is the inner function used by `jax.lax.scan` to iterate over the time series.
-    It performs rebalancing at the open price and computes portfolio value at the close
-    price for the same day.
-
-    The function implements the following daily workflow:
-        1. Rebalance portfolio at market open using target weights
-        2. Hold the new positions throughout the day
-        3. Mark portfolio to market at close prices
+    Used internally by `jax.lax.scan`.
 
     Args:
-        carry: State carried forward from previous step. A tuple containing:
-            - N_current: Current share holdings. Shape: (N,).
-            - cash_current: Current cash holdings. Shape: ().
-        x: Input data for current step. A tuple containing:
-            - price_open: Open prices. Shape: (N,).
-            - price_close: Close prices. Shape: (N,).
-            - w_target: Target weights. Shape: (N,).
-            - mask: Rebalancing mask. Shape: (). Values: 0 or 1.
-            - t_bps: Transaction costs in bps. Shape: ().
+        carry (jax.Array): State carried forward (N_current).
+        x (tuple): Inputs for step (open, close, weights, mask, costs).
 
     Returns:
-        A tuple containing:
-            - new_carry: Updated state for next step. Tuple of (N_new, cash_new).
-            - outputs: Observables for this step. Tuple containing:
-                - val_close: Portfolio value at close. Shape: ().
-                - cost: Transaction costs incurred. Shape: ().
-                - N_new: Share holdings after rebalancing. Shape: (N,).
-                - cash_new: Cash holdings after rebalancing. Shape: ().
-
-    Notes:
-        This function is not meant to be called directly. Use `backtest` instead,
-        which wraps this function with `jax.lax.scan`.
-
-    See Also:
-        backtest: Main entry point for backtesting.
-        state_transition: The rebalancing logic used within this function.
+        tuple: (new_carry, (val_close, cost, N_new))
     """
-    N_prev, cash_prev = carry
+    N_prev = carry
     price_open, price_close, w_target, mask, t_bps = x
 
     # Rebalance at Open
-    N_new, cash_new, cost = state_transition(
-        N_prev, cash_prev, price_open, w_target, mask, t_bps
-    )
+    N_new, cost = state_transition(N_prev, price_open, w_target, mask, t_bps)
 
-    # Portfolio Value at Close = Shares * Close Price + Cash
-    val_close = jnp.sum(N_new * price_close) + cash_new
+    # Portfolio Value at Close = Shares * Close Price
+    val_close = jnp.sum(N_new * price_close)
 
-    return (N_new, cash_new), (val_close, cost, N_new, cash_new)
+    return N_new, (val_close, cost, N_new)
 
 
 @jax.jit
 def backtest(
     N_0: jax.Array,
-    cash_0: jax.Array,
     open: jax.Array,
     close: jax.Array,
     target_weights: jax.Array,
     rebalancing_mask: jax.Array,
     transaction_costs_bps: jax.Array,
-) -> tp.Tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+) -> tp.Tuple[jax.Array, jax.Array, jax.Array]:
     """Execute a vectorized backtest with transaction costs using JAX.
 
-    This is the main entry point for backtesting portfolio strategies. It simulates
-    the evolution of a multi-asset portfolio over time, rebalancing according to
-    target weights and incurring transaction costs on trades.
+    This function simulates the evolution of a portfolio over a specified time
+    horizon. The simulation iterates through the provided time series data,
+    evaluating at each time step whether a rebalancing event should occur based
+    on the binary rebalancing mask. When rebalancing is triggered (mask value
+    equals 1), the portfolio holdings are adjusted to match the target weights
+    while accounting for proportional transaction costs deducted from the
+    portfolio value.
 
-    Key features:
-        - **Vectorized execution**: Entire backtest runs in a single JAX operation
-        - **No lookahead bias**: Rebalancing uses only open prices
-        - **Transaction cost modeling**: Proportional costs based on turnover
-        - **Flexible rebalancing**: Support for any schedule via mask
-        - **Cash tracking**: Explicit handling of uninvested capital
+    The function is JIT-compiled using ``@jax.jit`` for optimal performance.
+    The internal implementation leverages ``jax.lax.scan`` for efficient
+    sequential state transitions, making it highly suitable for:
 
-    Performance characteristics:
-        - JIT-compiled for speed (~1000x faster than Python loops)
-        - Differentiable (can compute gradients w.r.t. strategy parameters)
-        - Compatible with `jax.vmap` for parallel backtests
+    - Processing long time series (thousands of trading days)
+    - Hyperparameter optimization via ``jax.vmap`` for parallel backtests
+    - Gradient-based optimization of portfolio strategies via ``jax.grad``
+
+    The function enforces that ``target_weights`` must sum to 1.0 at every time
+    step. This constraint is validated by the ``BacktestConfig`` class when used
+    with the configuration pattern. Direct calls to this function bypass Pydantic
+    validation, so users should ensure input validity when calling directly.
 
     Args:
-        N_0: Initial share holdings for each asset. Shape: (N,) where N is the
-            number of assets. Typically zeros for cash-only start.
-        cash_0: Initial cash holdings. Shape: (). Units: currency.
-            Example: 100_000.0 for $100k initial capital.
-        open: Open prices over the backtest period. Shape: (T, N) where T is the
-            number of time periods. Units: currency per share.
-        close: Close prices over the backtest period. Shape: (T, N).
-            Used for marking-to-market at end of each period.
-        target_weights: Target portfolio weights over time. Shape: (T, N).
-            Each row should satisfy $0 \\leq w_{t,i} \\leq 1$.
-            If $\\sum_i w_{t,i} < 1$, remainder is allocated to cash.
-        rebalancing_mask: Binary indicator for rebalancing days. Shape: (T,).
-            Values: 0 (hold) or 1 (rebalance). Example: rebalance every Friday.
-        transaction_costs_bps: Transaction costs in basis points over time.
-            Shape: (T,). Units: bps. Can vary over time to model changing
-            market conditions. Example: 10.0 for 10 bps = 0.1%.
+        N_0 (jax.Array): Initial share holdings for each asset at the start of
+            the backtest. This represents the number of shares held in each
+            asset before any trading occurs.
+
+            - Shape: ``(N,)`` where ``N`` is the number of assets in the
+              portfolio.
+            - Units: Number of shares (can be fractional).
+            - Example: ``jnp.array([1000.0, 0.0, 0.0])`` represents 1000 shares
+              of asset 0 and no shares of assets 1 and 2.
+
+        open (jax.Array): Open prices for each asset at each time step. These
+            prices are used for executing rebalancing trades. Rebalancing at
+            open prices eliminates lookahead bias since the open price is known
+            at the start of the trading day.
+
+            - Shape: ``(T, N)`` where ``T`` is the number of time steps and
+              ``N`` is the number of assets.
+            - Units: Currency per share (e.g., dollars per share).
+            - Note: Zero values are treated as missing data or delisted
+              securities. The function applies safe division to prevent
+              numerical errors.
+
+        close (jax.Array): Close prices for each asset at each time step. These
+            prices are used for marking-to-market the portfolio and computing
+            end-of-day portfolio values.
+
+            - Shape: ``(T, N)`` where ``T`` is the number of time steps and
+              ``N`` is the number of assets.
+            - Units: Currency per share (e.g., dollars per share).
+
+        target_weights (jax.Array): Target portfolio weights specifying the
+            desired allocation to each asset at each time step. The weights
+            represent the fraction of total portfolio value to allocate to
+            each asset.
+
+            - Shape: ``(T, N)`` where ``T`` is the number of time steps and
+              ``N`` is the number of assets.
+            - Constraint: Must sum to exactly 1.0 along the asset axis (axis=1)
+              for every time step. Violation of this constraint may lead to
+              unexpected behavior.
+            - Example: ``jnp.array([[0.5, 0.3, 0.2]])`` allocates 50% to asset
+              0, 30% to asset 1, and 20% to asset 2.
+
+        rebalancing_mask (jax.Array): Binary indicator specifying whether to
+            rebalance the portfolio at each time step. A value of 1.0 triggers
+            rebalancing to target weights, while 0.0 maintains current holdings.
+
+            - Shape: ``(T,)`` where ``T`` is the number of time steps.
+            - Values: 0.0 (hold current positions) or 1.0 (rebalance to target
+              weights).
+            - Example: ``jnp.zeros(252).at[::5].set(1.0)`` rebalances every
+              5 trading days over a 252-day period.
+
+        transaction_costs_bps (jax.Array): Transaction costs for each asset at each time step
+            expressed in basis points. One basis point equals 0.01% or 1/10000
+            of the traded value. Costs are applied proportionally to the
+            absolute dollar value of turnover.
+
+            - Shape: ``(T, N)`` where ``T`` is the number of time steps and
+              ``N`` is the number of assets.
+            - Units: Basis points (bps). For example, 10.0 represents 0.1%
+              transaction cost.
+            - Note: Costs are only incurred on rebalancing days (when
+              ``rebalancing_mask == 1``).
 
     Returns:
-        A tuple containing four arrays:
-            - portfolio_values: Portfolio value at close each period. Shape: (T,).
-              Units: currency. This is the main performance metric.
-            - transaction_costs: Costs incurred each period. Shape: (T,).
-              Zero on non-rebalancing days.
-            - N_holdings: Share holdings over time. Shape: (T, N).
-              Shows portfolio composition evolution.
-            - cash_holdings: Cash holdings over time. Shape: (T,).
-              Tracks uninvested capital.
+        tuple[jax.Array, jax.Array, jax.Array]: A tuple containing three JAX
+            arrays with the backtest results:
+
+            - **portfolio_values** (jax.Array): The total portfolio value at
+              the close of each trading day, computed as the sum of share
+              holdings multiplied by close prices.
+
+              - Shape: ``(T,)``
+              - Units: Currency (e.g., dollars)
+
+            - **transaction_costs** (jax.Array): The transaction costs incurred
+              at each time step. Non-zero values occur only on rebalancing days.
+
+              - Shape: ``(T,)``
+              - Units: Currency (e.g., dollars)
+
+            - **N_holdings** (jax.Array): The number of shares held in each
+              asset at the end of each time step, after any rebalancing.
+
+              - Shape: ``(T, N)``
+              - Units: Number of shares
 
     Raises:
-        ValueError: If input shapes are inconsistent.
-        TypeError: If inputs are not JAX arrays.
+        TypeError: If any input is not a JAX array (when using BacktestConfig
+            validation).
+        ValueError: If input shapes are inconsistent or if target_weights do
+            not sum to 1.0 (when using BacktestConfig validation).
+
+    Note:
+        **Cash Position Simulation**: If you need to simulate a cash position,
+        include it as an explicit asset in the portfolio. Set the cash asset's
+        open and close prices to 1.0 (unit value) throughout the backtest.
+        Adjust the cash weight to 0.0 when fully invested in other assets and
+        to higher values when reducing exposure. Additionally, ensure the
+        transaction cost column for the cash asset is set to 0.0, as cash
+        changes typically do not incur transaction fees.
 
     Example:
+        Basic usage with a three-asset portfolio:
+
         >>> import jax.numpy as jnp
         >>> from silkroad.functional.backtest import backtest
         >>>
-        >>> # Setup: 3 assets, 252 trading days, start with $1M cash
-        >>> T, N = 252, 3
-        >>> N_0 = jnp.zeros(N)
-        >>> cash_0 = jnp.array(1_000_000.0)
+        >>> # Initial holdings: 1000 shares of cash (asset 0)
+        >>> N_0 = jnp.array([1000.0, 0.0, 0.0])
         >>>
-        >>> # Simulate price data (random walk)
-        >>> key = jax.random.PRNGKey(42)
-        >>> returns = jax.random.normal(key, (T, N)) * 0.01
-        >>> prices = 100.0 * jnp.exp(jnp.cumsum(returns, axis=0))
-        >>> open_prices = prices * 0.99  # Open slightly below close
-        >>> close_prices = prices
+        >>> # Price data for 252 trading days
+        >>> open_prices = jnp.ones((252, 3)) * 100.0
+        >>> open_prices = open_prices.at[:, 0].set(1.0)  # Cash at $1
+        >>> close_prices = open_prices
         >>>
-        >>> # Strategy: 60/30/10 portfolio, rebalance monthly
-        >>> weights = jnp.array([[0.6, 0.3, 0.1]] * T)
-        >>> rebal_mask = jnp.zeros(T).at[::21].set(1.0)  # ~Monthly
+        >>> # Equal weight allocation
+        >>> weights = jnp.ones((252, 3)) / 3
         >>>
-        >>> # 5 bps transaction costs
-        >>> costs_bps = jnp.ones(T) * 5.0
+        >>> # Weekly rebalancing with 10 bps cost
+        >>> rebal_mask = jnp.zeros(252).at[::5].set(1.0)
+        >>> costs_bps = jnp.ones(252) * 10.0
         >>>
-        >>> # Run backtest
-        >>> pv, tc, holdings, cash = backtest(
-        ...     N_0, cash_0, open_prices, close_prices,
+        >>> portfolio_values, transaction_costs, holdings = backtest(
+        ...     N_0, open_prices, close_prices,
         ...     weights, rebal_mask, costs_bps
         ... )
-        >>>
-        >>> # Analyze results
-        >>> total_return = (pv[-1] - cash_0) / cash_0
-        >>> total_costs = jnp.sum(tc)
-        >>> print(f"Total return: {total_return:.2%}")
-        >>> print(f"Total transaction costs: ${total_costs:,.2f}")
-        >>>
-        >>> # Check final allocation
-        >>> final_weights = (holdings[-1] * close_prices[-1]) / pv[-1]
-        >>> print(f"Final weights: {final_weights}")
-
-    Notes:
-        - The function assumes all timestamps are aligned across inputs
-        - Missing prices (zeros) are handled but should be avoided when possible
-        - For timezone-aware data, ensure all inputs use the same timezone (UTC)
-        - The function is deterministic given the same inputs
 
     See Also:
-        state_transition: Core rebalancing logic.
-        backtest_scan_fn: Inner scan function used for iteration.
+        BacktestConfig: Pydantic model for input validation.
+        state_transition: Core single-step rebalancing logic.
     """
     xs = (open, close, target_weights, rebalancing_mask, transaction_costs_bps)
 
-    _, outputs = jax.lax.scan(backtest_scan_fn, (N_0, cash_0), xs)
+    _, outputs = jax.lax.scan(backtest_scan_fn, N_0, xs)
 
     return outputs

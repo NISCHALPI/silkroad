@@ -136,7 +136,7 @@ class Sector(Enum):
     MATERIALS = "materials"
     REAL_ESTATE = "real_estate"
     COMM_SERVICES = "communication_services"
-    OTHERS = "others"  # Use this for Assets that don't have a sector (like Cash/Crypto)
+    OTHERS = "others"  # Use this for Assets that don't have a sector (like Cash/Crypto/Bonds)
 
 
 class Exchange(Enum):
