@@ -45,7 +45,7 @@ import datetime as dt
 import typing as tp
 from typing import Union
 from silkroad.core.enums import Horizon
-from silkroad.core.data_models import Asset
+from silkroad.core.data_models import Asset, Exchange
 from silkroad.db.backends import DataBackendProvider
 from silkroad.logging.logger import logger
 from silkroad.core.data_models import UniformBarSet, UniformBarCollection
@@ -203,8 +203,285 @@ class ArcticDatabase:
             df.index = df.index.tz_convert("UTC").tz_localize(None)
 
         # If naive, we assume it is UTC and leave it as naive.
-
         return df
+
+    def _classify_assets(
+        self,
+        assets: list[Asset],
+        lib: tp.Any,
+        end_date: dt.datetime,
+        user_start_date: tp.Optional[dt.datetime] = None,
+        lookback_buffer: int = DEFAULT_CORPORATE_ACTION_LOOKBACK_DAYS,
+    ) -> tuple[list[Asset], list[Asset], dict, dict]:
+        """Classify assets into new vs. existing and calculate effective start dates.
+
+        **Purpose**: Separate assets that need full historical load from those that only
+        need incremental updates. Calculate the correct fetch start date for each group.
+
+        **Behavior**:
+        - For new assets: Use user_start_date (if provided) or DEFAULT_START_DATE
+        - For existing assets: Use max(user_start_date, tail_timestamp - lookback_buffer)
+          to ensure overlap for corporate action detection while respecting user intent
+        - Returns metadata dicts for tracking last timestamps
+
+        Args:
+            assets (list[Asset]): Assets to classify.
+            lib (adb.Library): ArcticDB library to check for existing data.
+            end_date (datetime): End date for range determination.
+            user_start_date (datetime, optional): User-provided start date.
+            lookback_buffer (int): Days to lookback for overlap detection.
+
+        Returns:
+            tuple: (new_assets, update_assets, new_metadata, update_metadata)
+                - new_assets (list[Asset]): Assets with no existing data
+                - update_assets (list[Asset]): Assets with existing data
+                - new_metadata (dict): Empty dict for new assets
+                - update_metadata (dict): Maps asset.ticker → last_timestamp (naive UTC)
+        """
+        new_assets = []
+        update_assets = []
+        new_metadata = {}
+        update_metadata = {}
+
+        for asset in assets:
+            symbol = asset.ticker
+            last_ts = self._get_last_timestamp(lib, symbol)
+
+            if last_ts is None:
+                # New asset
+                new_assets.append(asset)
+                new_metadata[symbol] = None
+            else:
+                # Existing asset - make naive UTC for internal use
+                last_ts_naive = last_ts.replace(tzinfo=None)
+                update_assets.append(asset)
+                update_metadata[symbol] = last_ts_naive
+
+        return new_assets, update_assets, new_metadata, update_metadata
+
+    def _fetch_tails_for_comparison(
+        self,
+        assets: list[Asset],
+        end_date: dt.datetime,
+        horizon: Horizon,
+        window_days: int = DEFAULT_CORPORATE_ACTION_LOOKBACK_DAYS,
+    ) -> dict[str, pd.DataFrame]:
+        """Fetch tail entries for all update assets in a single bulk API call.
+
+        **Purpose**: Retrieve recent bars for comparison with stored data to detect
+        corporate actions. Uses single API call instead of per-asset calls.
+
+        **Returns**: Dict mapping ticker → tail DataFrame (most recent N bars, naive UTC)
+
+        Args:
+            assets (list[Asset]): Assets to fetch tails for.
+            end_date (datetime): End date (typically now).
+            horizon (Horizon): Data frequency.
+            window_days (int): Number of days to fetch (default 5).
+
+        Returns:
+            dict: Maps ticker (str) → DataFrame with tail bars (naive UTC index, OHLCV columns)
+        """
+        if not assets:
+            return {}
+
+        # Calculate tail fetch window
+        tail_start = end_date - dt.timedelta(
+            days=window_days * 2
+        )  # Generous buffer for gaps
+        tail_start = (
+            tail_start.replace(tzinfo=dt.timezone.utc)
+            if tail_start.tzinfo is None
+            else tail_start
+        )
+
+        logger.info(f"Fetching tails for {len(assets)} assets")
+        try:
+            df_tails = self.backend.fetch_data(
+                assets, start=tail_start, end=end_date, horizon=horizon
+            )
+            if df_tails.empty:
+                logger.warning("No tail data returned from backend")
+                return {}
+
+            # Convert timezone-aware response to naive UTC
+            df_tails = self._to_naive_utc(df_tails)
+
+            # Extract per-asset tails
+            tails_dict = {}
+            for symbol in df_tails.index.get_level_values("symbol").unique():
+                tail_df = df_tails.xs(symbol, level="symbol")
+                tails_dict[symbol] = tail_df
+
+            return tails_dict
+        except Exception as e:
+            logger.error(f"Failed to fetch tails: {e}")
+            raise e
+
+    def _compare_tails_and_classify(
+        self,
+        update_assets: list[Asset],
+        update_metadata: dict,
+        tails_dict: dict[str, pd.DataFrame],
+        lib: tp.Any,
+        horizon: Horizon = Horizon.DAILY,
+        lookback_buffer: int = DEFAULT_CORPORATE_ACTION_LOOKBACK_DAYS,
+    ) -> tuple[list[Asset], list[Asset]]:
+        """Compare tail entries against stored data to detect corporate actions.
+
+        **Purpose**: Separate safe-update assets (data matches) from resync-candidates
+        (mismatches detected). Uses existing tolerance logic.
+
+        **Behavior**:
+        - Reads stored tail from ArcticDB (naive UTC)
+        - Compares OHLCV values using relative tolerance (1e-4)
+        - If mismatch detected → queue for full resync
+        - Otherwise → safe for incremental append
+
+        Args:
+            update_assets (list[Asset]): Assets that exist and may be updated.
+            update_metadata (dict): Maps ticker → last_timestamp (naive UTC).
+            tails_dict (dict): Maps ticker → tail DataFrame from API (naive UTC).
+            lib (adb.Library): ArcticDB library for reading stored data.
+            horizon (Horizon): Data horizon (e.g., DAILY, MINUTE).
+            lookback_buffer (int): Days to lookback (for date range).
+
+        Returns:
+            tuple: (safe_updates, resync_candidates)
+                - safe_updates (list[Asset]): Data matches, safe to append
+                - resync_candidates (list[Asset]): Mismatches detected, need full resync
+        """
+        safe_updates = []
+        resync_candidates = []
+
+        for asset in update_assets:
+            symbol = asset.ticker
+            tail_df = tails_dict.get(symbol)
+            if tail_df is None or tail_df.empty:
+                logger.warning(f"No tail data for {symbol}, queuing for resync")
+                resync_candidates.append(asset)
+                continue
+
+            last_ts_naive = update_metadata[symbol]
+            needs_resync = False
+
+            # Calculate overlap window
+            overlap_end = min(tail_df.index.max(), last_ts_naive)
+            overlap_start = tail_df.index.min()
+
+            if overlap_start <= overlap_end:
+                try:
+                    # Read stored data in overlap range (naive UTC)
+                    existing = self.read(
+                        symbol,
+                        horizon,
+                        start=overlap_start,
+                        end=overlap_end,
+                    )
+                    if not existing.empty:
+                        # Find common timestamps
+                        common = existing.index.intersection(tail_df.index)
+                        if not common.empty:
+                            # Compare close prices (with tolerance)
+                            close_col = (
+                                "close" if "close" in tail_df.columns else "Close"
+                            )
+                            if (
+                                close_col in existing.columns
+                                and close_col in tail_df.columns
+                            ):
+                                existing_close = existing.loc[common, close_col]
+                                tail_close = tail_df.loc[common, close_col]
+
+                                # Use isclose for robust comparison
+                                matches = np.isclose(
+                                    existing_close.values,
+                                    tail_close.values,
+                                    rtol=DEFAULT_CORPORATE_ACTION_TOLERANCE,
+                                    equal_nan=True,
+                                )
+                                if not matches.all():
+                                    logger.warning(
+                                        f"Mismatch detected for {symbol} in tail comparison. "
+                                        "Queuing for resync."
+                                    )
+                                    needs_resync = True
+                except Exception as e:
+                    logger.warning(
+                        f"Error comparing tail for {symbol}: {e}. Queuing for resync."
+                    )
+                    needs_resync = True
+
+            if needs_resync:
+                resync_candidates.append(asset)
+            else:
+                safe_updates.append(asset)
+
+        return safe_updates, resync_candidates
+
+    def _fetch_data_bulk(
+        self,
+        assets: list[Asset],
+        start_date: dt.datetime,
+        end_date: dt.datetime,
+        horizon: Horizon,
+        mode: str = "new",
+    ) -> pd.DataFrame:
+        """Batch-fetch data for multiple assets in a single API call.
+
+        **Purpose**: Fetch historical or incremental data for a group of assets
+        with a single backend call instead of per-asset calls.
+
+        **Modes**:
+        - "new": Fetch full history from start_date to end_date (for new + resync assets)
+        - "update": Fetch from (last_timestamp - lookback) to end_date (incremental)
+
+        Args:
+            assets (list[Asset]): Assets to fetch.
+            start_date (datetime): Fetch start date (inclusive).
+            end_date (datetime): Fetch end date (inclusive).
+            horizon (Horizon): Data frequency.
+            mode (str): "new" for historical, "update" for incremental.
+
+        Returns:
+            pd.DataFrame: MultiIndex DataFrame (symbol, timestamp) with OHLCV data
+                in naive UTC format ready for ArcticDB storage.
+        """
+        if not assets:
+            return pd.DataFrame()
+
+        logger.info(
+            f"Batch fetching {len(assets)} assets in '{mode}' mode "
+            f"from {start_date} to {end_date}"
+        )
+        try:
+            df = self.backend.fetch_data(
+                assets, start=start_date, end=end_date, horizon=horizon
+            )
+            if df.empty:
+                logger.warning(f"No data returned for {len(assets)} assets")
+                return df
+
+            # Validate required columns
+            required_cols = [
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "trade_count",
+                "vwap",
+            ]
+            missing_cols = [c for c in required_cols if c not in df.columns]
+            if missing_cols:
+                logger.warning(f"Missing columns in fetched data: {missing_cols}")
+
+            # Convert timezone-aware response to naive UTC
+            df = self._to_naive_utc(df)
+            return df
+        except Exception as e:
+            logger.error(f"Failed to fetch data for {len(assets)} assets: {e}")
+            raise e
 
     def sync(
         self,
@@ -288,158 +565,143 @@ class ArcticDatabase:
         lib = self.get_library(horizon)
 
         if end_date is None:
-            end_date = dt.datetime.now(dt.timezone.utc)
+            end_date = (
+                Exchange.NYSE.previous_market_close()
+            )  # Default to last NYSE close
 
         if end_date.tzinfo is None:
             end_date = end_date.replace(tzinfo=dt.timezone.utc)
 
-        new_assets = []
-        update_assets = []
-        min_update_start = end_date
-
         # Map ticker to Asset object for easy lookup and metadata extraction
         asset_map = {a.ticker: a for a in assets}
 
-        # 1. Classification
-        for asset in assets:
-            symbol = asset.ticker
-            last_ts = self._get_last_timestamp(lib, symbol)
+        # **PHASE 1: Asset Classification**
+        # Separate assets into new vs. existing, determine start dates
+        logger.info(f"Phase 1: Classifying {len(assets)} assets")
+        new_assets, update_assets, new_meta, update_meta = self._classify_assets(
+            assets,
+            lib,
+            end_date,
+            user_start_date=start_date,
+            lookback_buffer=lookback_buffer,
+        )
+        logger.info(
+            f"Classification: {len(new_assets)} new, {len(update_assets)} existing"
+        )
 
-            if last_ts:
-                # Existing asset
-                fetch_start = last_ts - dt.timedelta(days=lookback_buffer)
-                if fetch_start.tzinfo is None:
-                    fetch_start = fetch_start.replace(tzinfo=dt.timezone.utc)
-
-                if fetch_start < end_date:
-                    update_assets.append(asset)
-                    if fetch_start < min_update_start:
-                        min_update_start = fetch_start
-            else:
-                # New asset
-                new_assets.append(asset)
-
-        # 2. Handle New Assets (Batch Fetch)
-        if new_assets:
-            fetch_start = start_date or DEFAULT_START_DATE
-            logger.info(
-                f"Batch fetching {len(new_assets)} new assets from {fetch_start}"
-            )
-            try:
-                df_new = self.backend.fetch_data(
-                    new_assets, start=fetch_start, end=end_date, horizon=horizon
-                )
-                if not df_new.empty:
-                    df_new = self._to_naive_utc(df_new)
-                    for symbol in df_new.index.get_level_values("symbol").unique():
-                        asset = asset_map.get(symbol)
-                        # Store asset metadata (convert to JSON-compatible dict)
-                        metadata = asset.model_dump(mode="json") if asset else None
-
-                        lib.write(
-                            symbol, df_new.xs(symbol, level="symbol"), metadata=metadata
-                        )
-                        logger.info(
-                            f"Initialized {symbol} with {len(df_new.xs(symbol, level='symbol'))} bars"
-                        )
-            except Exception as e:
-                logger.error(f"Failed to fetch new assets: {e}")
-                raise e
-
-        # 3. Handle Updates (Batch Fetch)
-        resync_assets = []
+        # **PHASE 2: Batch Tail-Fetch for Comparison**
+        # Fetch tails for all update assets in single API call
+        logger.info(f"Phase 2: Fetching tails for {len(update_assets)} update assets")
+        tails_dict = {}
         if update_assets:
-            logger.info(
-                f"Batch fetching updates for {len(update_assets)} assets from {min_update_start}"
-            )
             try:
-                df_update = self.backend.fetch_data(
-                    update_assets, start=min_update_start, end=end_date, horizon=horizon
+                tails_dict = self._fetch_tails_for_comparison(
+                    update_assets, end_date, horizon, window_days=lookback_buffer
                 )
-
-                if not df_update.empty:
-                    df_update = self._to_naive_utc(df_update)
-
-                    for symbol in df_update.index.get_level_values("symbol").unique():
-                        df_symbol = df_update.xs(symbol, level="symbol")
-                        asset = asset_map.get(symbol)
-                        metadata = asset.model_dump(mode="json") if asset else None
-
-                        # Corporate Action Check
-                        needs_resync = False
-                        last_ts = self._get_last_timestamp(lib, symbol)
-                        if last_ts:
-                            last_ts_naive = last_ts.replace(tzinfo=None)
-                            overlap_end = min(df_symbol.index.max(), last_ts_naive)
-                            overlap_start = df_symbol.index.min()
-
-                            if overlap_start <= overlap_end:
-                                existing = self.read(
-                                    symbol,
-                                    horizon,
-                                    start=overlap_start,
-                                    end=overlap_end,
-                                )
-                                if not existing.empty:
-                                    common = existing.index.intersection(
-                                        df_symbol.index
-                                    )
-                                    if not common.empty:
-                                        col = (
-                                            "close"
-                                            if "close" in df_symbol.columns
-                                            else "Close"
-                                        )
-                                        if (
-                                            col in existing.columns
-                                            and col in df_symbol.columns
-                                        ):
-                                            if not np.isclose(
-                                                existing.loc[common, col],
-                                                df_symbol.loc[common, col],
-                                                rtol=DEFAULT_CORPORATE_ACTION_TOLERANCE,
-                                                equal_nan=True,
-                                            ).all():
-                                                logger.warning(
-                                                    f"Mismatch detected for {symbol}. Queuing for resync."
-                                                )
-                                                needs_resync = True
-                                                if asset:
-                                                    resync_assets.append(asset)
-
-                        if not needs_resync:
-                            lib.update(symbol, df_symbol, metadata=metadata)
-                            logger.info(f"Updated {symbol}")
-
+                logger.info(f"Retrieved tails for {len(tails_dict)} assets")
             except Exception as e:
-                logger.error(f"Failed to fetch updates: {e}")
-                raise e
+                logger.error(f"Failed to fetch tails: {e}")
+                # Continue anyway — will handle in classification step
+                tails_dict = {}
 
-        # 4. Handle Resyncs (Batch Fetch)
-        if resync_assets:
+        # **PHASE 3: Classify Updates vs. Resyncs**
+        # Compare tails to detect corporate actions
+        logger.info("Phase 3: Comparing tails for corporate action detection")
+        safe_updates = []
+        resync_candidates = []
+        if update_assets and tails_dict:
+            try:
+                safe_updates, resync_candidates = self._compare_tails_and_classify(
+                    update_assets,
+                    update_meta,
+                    tails_dict,
+                    lib,
+                    horizon=horizon,
+                    lookback_buffer=lookback_buffer,
+                )
+                logger.info(
+                    f"Classification: {len(safe_updates)} safe-updates, "
+                    f"{len(resync_candidates)} resync-candidates"
+                )
+            except Exception as e:
+                logger.error(f"Failed to classify tails: {e}")
+                # Fallback: treat all as safe updates
+                safe_updates = update_assets
+                resync_candidates = []
+
+        # **PHASE 4A: Batch Fetch for New + Resync Assets**
+        # Fetch full history for new assets and resync candidates
+        full_resync_assets = new_assets + resync_candidates
+        if full_resync_assets:
             fetch_start = start_date or DEFAULT_START_DATE
             logger.info(
-                f"Batch resyncing {len(resync_assets)} assets from {fetch_start}"
+                f"Phase 4A: Batch fetching {len(full_resync_assets)} assets (new + resync) "
+                f"from {fetch_start} to {end_date}"
             )
             try:
-                df_resync = self.backend.fetch_data(
-                    resync_assets, start=fetch_start, end=end_date, horizon=horizon
+                df_full = self._fetch_data_bulk(
+                    full_resync_assets, fetch_start, end_date, horizon, mode="new"
                 )
-                if not df_resync.empty:
-                    df_resync = self._to_naive_utc(df_resync)
-                    for symbol in df_resync.index.get_level_values("symbol").unique():
+                if not df_full.empty:
+                    for symbol in df_full.index.get_level_values("symbol").unique():
+                        df_symbol = df_full.xs(symbol, level="symbol")
                         asset = asset_map.get(symbol)
                         metadata = asset.model_dump(mode="json") if asset else None
 
-                        lib.write(
-                            symbol,
-                            df_resync.xs(symbol, level="symbol"),
-                            metadata=metadata,
+                        lib.write(symbol, df_symbol, metadata=metadata)
+                        logger.info(
+                            f"Wrote {symbol}: {len(df_symbol)} bars "
+                            f"(new or full resync)"
                         )
-                        logger.info(f"Resynced {symbol}")
             except Exception as e:
-                logger.error(f"Failed to resync assets: {e}")
+                logger.error(f"Failed to fetch/write new+resync assets: {e}")
                 raise e
+
+        # **PHASE 4B: Batch Fetch for Safe-Update Assets**
+        # Fetch incremental data for safe updates (from last_timestamp - lookback to end)
+        if safe_updates:
+            # Calculate minimum last timestamp for safe updates
+            min_safe_last_ts = min(
+                update_meta.get(a.ticker)
+                for a in safe_updates
+                if a.ticker in update_meta
+            )
+            if min_safe_last_ts is None:
+                logger.warning("No last timestamp for safe updates, skipping phase 4B")
+            else:
+                fetch_start = min_safe_last_ts - dt.timedelta(days=lookback_buffer)
+                fetch_start = (
+                    fetch_start.replace(tzinfo=dt.timezone.utc)
+                    if fetch_start.tzinfo is None
+                    else fetch_start
+                )
+
+                logger.info(
+                    f"Phase 4B: Batch fetching {len(safe_updates)} safe-update assets "
+                    f"from {fetch_start} to {end_date}"
+                )
+                try:
+                    df_updates = self._fetch_data_bulk(
+                        safe_updates, fetch_start, end_date, horizon, mode="update"
+                    )
+                    if not df_updates.empty:
+                        for symbol in df_updates.index.get_level_values(
+                            "symbol"
+                        ).unique():
+                            df_symbol = df_updates.xs(symbol, level="symbol")
+                            asset = asset_map.get(symbol)
+                            metadata = asset.model_dump(mode="json") if asset else None
+
+                            # Append new bars to existing data
+                            lib.update(symbol, df_symbol, metadata=metadata)
+                            logger.info(
+                                f"Updated {symbol}: appended {len(df_symbol)} bars"
+                            )
+                except Exception as e:
+                    logger.error(f"Failed to fetch/update safe-update assets: {e}")
+                    raise e
+
+        logger.info("Sync complete")
 
     def _get_last_timestamp(self, lib: tp.Any, symbol: str) -> tp.Optional[dt.datetime]:
         """Retrieve the most recent timestamp for a symbol in the library.
@@ -462,7 +724,9 @@ class ArcticDatabase:
         try:
             # Efficiently read the last index value
             item = lib.read(symbol, columns=[])
-            if item.data.empty:
+            # Check index length, not data.empty, because data may be empty (no columns)
+            # but index can still have timestamps
+            if len(item.data.index) == 0:
                 return None
 
             last_ts = item.data.index[-1]

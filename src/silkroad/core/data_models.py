@@ -26,7 +26,9 @@ from pydantic import (
     Field,
     computed_field,
 )
-from typing import List, Dict, Any, Optional, Union, Annotated, Tuple
+import yaml
+from pathlib import Path
+from typing import List, Dict, Any, Optional, Union, Annotated
 from alpaca.data.models.bars import Bar
 from silkroad.core.enums import Sector, AssetClass, Horizon, Exchange
 from silkroad.core.dtypes import UniformBarList
@@ -51,6 +53,7 @@ from silkroad.functional.paths import (
     multivariate_geometric_brownian_motion,
 )
 
+
 __all__ = ["UniformBarSet", "UniformBarCollection", "Asset"]
 
 
@@ -70,6 +73,25 @@ class Asset(BaseModel):
 
     def __str__(self) -> str:
         return f"Asset(ticker={self.ticker}, name={self.name}, class={self.asset_class}, sector={self.sector}, exchange={self.exchange})"
+
+    @staticmethod
+    def read_from_yaml(filepath: Union[str, Path]) -> list["Asset"]:
+        """Read a list of Asset objects from a YAML file.
+
+        Args:
+            filepath: Path to the YAML file containing asset definitions.
+
+        Returns:
+            List of Asset objects.
+        """
+        with open(filepath, "r") as f:
+            data = yaml.safe_load(f)
+
+        assets = []
+        for item in data:
+            asset = Asset.model_validate(item)
+            assets.append(asset)
+        return assets
 
 
 class UniformBarSet(BaseModel):
@@ -290,6 +312,23 @@ class UniformBarSet(BaseModel):
             buffer_limit=buffer_limit,
             max_bars=max_bars,
         )
+
+    @property
+    def log_returns(self) -> pd.Series:
+        """Compute log returns of the closing prices.
+
+        Returns:
+            Pandas Series of log returns indexed by timestamp.
+        """
+        df = self.df
+        if df.empty or len(df) < 2:
+            return pd.Series(dtype=float)
+
+        close_prices = df["close"]
+        log_returns = np.diff(np.log(close_prices.values))
+        log_return_index = df.index[1:]  # Align index with returns
+
+        return pd.Series(log_returns, index=log_return_index)
 
     def __repr__(self) -> str:
         return f"UniformBarSet(symbol={self.symbol}, timeframe={self.horizon.name}, bars={len(self)})"

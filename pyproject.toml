@@ -12,6 +12,7 @@ dependencies = [
     "arcticdb>=6.3.2",
     "backtrader>=1.9.78.123",
     "cvxpy>=1.7.3",
+    "datasets>=4.4.2",
     "fastapi[standard]>=0.123.0",
     "flax>=0.12.0",
     "fredapi>=0.5.2",

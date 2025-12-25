@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import yfinance as yf
 from fredapi import Fred
-from silkroad.logger.logger import logger
+from silkroad.logging.logger import logger
 
 
 __all__ = [
@@ -373,6 +373,54 @@ class MacroDataLoader:
     def __repr__(self) -> str:
         return f"<MacroDataLoader features={len(self.features)}>"
 
+    def fetch_feature_by_datetime_index(
+        self,
+        feature: MacroFeature,
+        datetime_index: pd.DatetimeIndex,
+        transform_stationary: bool = True,
+        interpolation_method: str = "ffill",
+    ) -> pd.Series:
+        """Fetches a single macro feature aligned to a specific index.
+
+        This method fetches a single macroeconomic feature over the range defined by
+        the provided datetime index and reindexes the result to match that index.
+        This is useful for ensuring that macro data aligns perfectly with
+        other datasets that share the same timestamps.
+
+        Args:
+            feature_name (str): The name of the feature to fetch (as defined in MacroFeature).
+            datetime_index (pd.DatetimeIndex): The target index to align data to.
+            transform_stationary (bool): If True, applies 'yoy' or 'diff' transformations defined in features.
+            interpolation_method (str): Method for upsampling ('ffill', 'linear', 'cubic', 'time').
+
+        Returns:
+            pd.Series: Macro feature reindexed to the provided index.
+        """
+        if datetime_index.empty:
+            return pd.Series(dtype=float)
+
+        # Ensure we cover the full range
+        start_date = datetime_index.min()
+        end_date = datetime_index.max()
+
+        # Fetch broadly on daily resolution (UTC midnight)
+        df = self.fetch_data(
+            start_date, end_date, transform_stationary, interpolation_method
+        )
+
+        if feature.name not in df.columns:
+            return pd.Series(dtype=float)
+
+        # Reindex to the target index.
+        # We use 'ffill' to propagate the daily (midnight) value to any intraday timestamps.
+        # Note: df is sorted by definition from fetch_data, which is required for ffill.
+
+        # Handle Timezone matching for reindex if necessary
+        # df.index is UTC. If datetime_index is naive, we might need to localize.
+        # Assuming datetime_index is consistent with the project (UTC-aware).
+
+        return df[feature.name].reindex(datetime_index, method="ffill")
+
     def fetch_data_by_datetime_index(
         self,
         datetime_index: pd.DatetimeIndex,
@@ -415,3 +463,39 @@ class MacroDataLoader:
         # Assuming datetime_index is consistent with the project (UTC-aware).
 
         return df.reindex(datetime_index, method="ffill")
+
+    def fetch_risk_free_rate_by_datetime_index(
+        self,
+        datetime_index: pd.DatetimeIndex,
+        transform_stationary: bool = False,
+        interpolation_method: str = "ffill",
+    ) -> pd.Series:
+        """Fetches the risk-free rate aligned to a specific index.
+
+        This is a convenience method to fetch the standard risk-free rate feature
+        defined in the default features list.
+
+        Args:
+            datetime_index (pd.DatetimeIndex): The target index to align data to.
+            transform_stationary (bool): If True, applies 'yoy' or 'diff' transformations defined in features.
+            interpolation_method (str): Method for upsampling ('ffill', 'linear', 'cubic', 'time').
+
+        Returns:
+            pd.Series: Risk-free rate feature reindexed to the provided index.
+
+        """
+        # Find the risk-free feature
+        risk_free_feature = next(
+            (feat for feat in self.features if feat.name == "rate_risk_free"), None
+        )
+
+        if risk_free_feature is None:
+            logger.error("Risk-free feature 'rate_risk_free' not found in features.")
+            return pd.Series(dtype=float)
+
+        return self.fetch_feature_by_datetime_index(
+            risk_free_feature,
+            datetime_index,
+            transform_stationary,
+            interpolation_method,
+        )

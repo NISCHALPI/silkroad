@@ -182,7 +182,17 @@ class AlpacaBackendProvider(DataBackendProvider):
             The method continues execution even if one asset class fails, returning
             data for successful requests.
         """
-        stocks = [a.ticker for a in asset if a.asset_class == AssetClass.STOCK]
+        stocks = [
+            a.ticker
+            for a in asset
+            if a.asset_class
+            in [
+                AssetClass.STOCK,
+                AssetClass.BOND,
+                AssetClass.COMMODITY,
+                AssetClass.REAL_ESTATE,
+            ]
+        ]
         cryptos = [a.ticker for a in asset if a.asset_class == AssetClass.CRYPTO]
 
         # Check if there are other type of assets
@@ -192,6 +202,7 @@ class AlpacaBackendProvider(DataBackendProvider):
             if a.asset_class
             not in (
                 AssetClass.STOCK,
+                AssetClass.BOND,
                 AssetClass.CRYPTO,
                 AssetClass.COMMODITY,
                 AssetClass.REAL_ESTATE,
