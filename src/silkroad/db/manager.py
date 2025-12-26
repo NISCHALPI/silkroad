@@ -8,6 +8,7 @@ import logging
 
 from silkroad.core.enums import Horizon, Exchange
 from silkroad.core.data_models import Asset, UniformBarSet, UniformBarCollection
+from silkroad.core.news_models import NewsArticle
 from silkroad.db.protocol import DatabaseProvider
 from silkroad.db.backends import DataBackendProvider
 from typing import Any
@@ -67,7 +68,10 @@ class DataManager:
             assets, horizon, user_start_date=start_date
         )
 
-        logger.info(f"Syncing: {len(new_assets)} new, {len(update_assets)} updates")
+        logger.info(
+            f"Sync Request for {len(assets)} assets. Classification: "
+            f"{len(new_assets)} NEW (Full Sync), {len(update_assets)} UPDATE (Incremental)."
+        )
 
         # 2. Tail Check (Corporate Action Detection) for Update Assets
         safe_updates = []
@@ -138,12 +142,12 @@ class DataManager:
         tail_start = end_date - dt.timedelta(days=lookback_days * 2)
 
         try:
-            logger.info("Fetching tails for comparison...")
+            logger.info("Fetching tails for corporate action detection...")
             incoming_tails = self.backend.fetch_data(
                 assets, tail_start, end_date, horizon
             )
         except Exception as e:
-            logger.error(f"Tail fetch failed: {e}")
+            logger.error(f"Tail fetch failed: {e}", exc_info=True)
             return (
                 assets,
                 [],
@@ -211,7 +215,8 @@ class DataManager:
             )
             if not is_close.all():
                 logger.warning(
-                    f"Split/Mismatch detected for {symbol}. Triggering Full Resync."
+                    f"SPLIT/MISMATCH detected for {symbol}. "
+                    f"Stored tail differs from Backend. Triggering Full Resync."
                 )
                 resync.append(asset)
             else:
@@ -230,15 +235,28 @@ class DataManager:
         if not assets:
             return
 
-        logger.info(f"Full Sync for {len(assets)} assets...")
+        logger.info(f"Starting Full Sync for {len(assets)} assets...")
         try:
             # Fetch in bulk
             data = self.backend.fetch_data(assets, start, end, horizon)
             if data.empty:
+                logger.warning(
+                    "Full Sync: Backend returned NO data for any of the requested assets."
+                )
                 return
 
+            # Check which symbols we actually got data for
+            fetched_symbols = set(data.index.get_level_values("symbol").unique())
+            requested_symbols = {a.ticker for a in assets}
+            missing = requested_symbols - fetched_symbols
+            if missing:
+                logger.warning(
+                    f"Full Sync: No data found for {len(missing)} symbols: {list(missing)}"
+                )
+
             # Write per symbol
-            for symbol in data.index.get_level_values("symbol").unique():
+            success_count = 0
+            for symbol in fetched_symbols:
                 df = data.xs(symbol, level="symbol")
 
                 # Get asset metadata
@@ -249,9 +267,14 @@ class DataManager:
                 self.db.save_market_data(
                     symbol, df, horizon, mode="replace", metadata=metadata
                 )
+                success_count += 1
+
+            logger.info(
+                f"Full Sync Completed: Successfully synced {success_count}/{len(assets)} assets."
+            )
 
         except Exception as e:
-            logger.error(f"Full sync failed: {e}")
+            logger.error(f"Full sync failed with critical error: {e}", exc_info=True)
 
     def _process_incremental_updates(
         self,
@@ -272,15 +295,20 @@ class DataManager:
         fetch_start = min_ts - dt.timedelta(days=lookback)
 
         logger.info(
-            f"Incremental update for {len(assets)} assets from {fetch_start}..."
+            f"Starting Incremental Update for {len(assets)} assets from {fetch_start} to {end}..."
         )
         try:
             data = self.backend.fetch_data(assets, fetch_start, end, horizon)
             if data.empty:
+                logger.info("Incremental Update: No new data available from backend.")
                 return
 
+            # Check coverage
+            fetched_symbols = set(data.index.get_level_values("symbol").unique())
+
             # Write
-            for symbol in data.index.get_level_values("symbol").unique():
+            count = 0
+            for symbol in fetched_symbols:
                 df = data.xs(symbol, level="symbol")
                 # Get asset metadata
                 asset = next((a for a in assets if a.ticker == symbol), None)
@@ -291,8 +319,14 @@ class DataManager:
                 self.db.save_market_data(
                     symbol, df, horizon, mode="replace", metadata=metadata
                 )
+                count += 1
+
+            logger.info(
+                f"Incremental Update Completed: Updated {count} symbols with new data."
+            )
+
         except Exception as e:
-            logger.error(f"Incremental update failed: {e}")
+            logger.error(f"Incremental update failed: {e}", exc_info=True)
 
     # --- Utility Methods ---
 
@@ -365,3 +399,89 @@ class DataManager:
     def get_summary(self, horizon: Horizon) -> pd.DataFrame:
         """Get summary statistics for the library."""
         return self.db.get_symbol_metadata(horizon)
+
+    # --- News Utilities ---
+
+    def add_news_from_dataframe(self, df: pd.DataFrame):
+        """Add news articles from a DataFrame.
+
+        This function is a wrapper around add_news.
+        It is provided for convenience.
+
+        Args:
+            df: DataFrame with columns:
+                - headline (req)
+                - content (req)
+                - source (req)
+                - timestamp (req)
+                - url (opt)
+                - sentiment (opt)
+                - tickers (opt, list or string)
+                - metadata (opt, dict)
+        """
+        if df.empty:
+            return
+
+        news_items = []
+        for _, row in df.iterrows():
+            # Handle tickers which might be a string "AAPL,MSFT" or list ["AAPL", "MSFT"]
+            tickers = row.get("tickers", [])
+            if isinstance(tickers, str):
+                tickers = [t.strip() for t in tickers.split(",") if t.strip()]
+            # Normalize list just in case it's numpy array or something
+            elif isinstance(tickers, (np.ndarray, list)):
+                tickers = list(tickers)
+            else:
+                tickers = []
+
+            article = NewsArticle(
+                timestamp=pd.to_datetime(row["timestamp"]),
+                headline=row["headline"],
+                content=row["content"],
+                source=row["source"],
+                url=row.get("url"),
+                sentiment=float(row.get("sentiment", 0.0)),
+                tickers=tickers,
+                metadata=row.get("metadata", {}),
+            )
+            news_items.append(article)
+
+        self.db.save_news(news_items)
+        logger.info(f"Saved {len(news_items)} news articles.")
+
+    def get_news_history(
+        self,
+        tickers: Optional[List[str]] = None,
+        start_date: Optional[dt.datetime] = None,
+        end_date: Optional[dt.datetime] = None,
+        include_global: bool = True,
+    ) -> pd.DataFrame:
+        """Get news history for tickers.
+
+        Args:
+            tickers: List of tickers.
+            start_date: Start date.
+            end_date: End date.
+            include_global: If True, includes general market news (ticker='MARKET').
+        """
+        if start_date is None:
+            start_date = dt.datetime(2000, 1, 1, tzinfo=dt.timezone.utc)
+        if end_date is None:
+            end_date = dt.datetime.now(dt.timezone.utc)
+
+        # Ensure UTC
+        if start_date.tzinfo is None:
+            start_date = start_date.replace(tzinfo=dt.timezone.utc)
+        if end_date.tzinfo is None:
+            end_date = end_date.replace(tzinfo=dt.timezone.utc)
+
+        query_tickers = list(tickers) if tickers else None
+
+        # If we have specific tickers and want global news, add MARKET ticker
+        if include_global and query_tickers is not None:
+            from silkroad.core.news_models import MARKET_TICKER
+
+            if MARKET_TICKER not in query_tickers:
+                query_tickers.append(MARKET_TICKER)
+
+        return self.db.get_news(query_tickers, start_date, end_date)

@@ -8,7 +8,7 @@ from silkroad.db.backends import DataBackendProvider, AlpacaBackendProvider
 __all__ = [
     "DatabaseProvider",
     "DuckDBStore",
-    "MarketDataManager",
+    "DataManager",
     "DataBackendProvider",
     "AlpacaBackendProvider",
 ]

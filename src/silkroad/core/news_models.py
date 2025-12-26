@@ -6,6 +6,9 @@ from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field, ConfigDict
 
 
+MARKET_TICKER = "MARKET"
+
+
 class NewsArticle(BaseModel):
     """Model representing a single news article."""
 
@@ -34,3 +37,7 @@ class NewsArticle(BaseModel):
         # Ensure timestamp is UTC
         if self.timestamp.tzinfo is None:
             self.timestamp = self.timestamp.replace(tzinfo=timezone.utc)
+
+        # Ensure at least one ticker exists (Market News)
+        if not self.tickers:
+            self.tickers = [MARKET_TICKER]

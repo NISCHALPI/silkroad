@@ -444,7 +444,7 @@ class DuckDBStore(DatabaseProvider):
             pd.DataFrame: DataFrame containing article details (id, timestamp, headline, etc.).
         """
         query = """
-            SELECT a.* 
+            SELECT DISTINCT a.* 
             FROM news_articles a
         """
 
