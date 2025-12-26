@@ -9,7 +9,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "alpaca-py>=0.43.2",
-    "arcticdb>=6.3.2",
+    "duckdb>=1.1.0",
     "backtrader>=1.9.78.123",
     "cvxpy>=1.7.3",
     "datasets>=4.4.2",
